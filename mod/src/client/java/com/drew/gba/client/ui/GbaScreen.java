@@ -17,7 +17,7 @@ import net.minecraft.sounds.SoundSource;
 
 import java.util.List;
 
-/** The Game Boy Advance: purple bezel around a 240x160 live texture. Esc closes (and saves). */
+/** The Game Boy Advance: purple bezel around a 240x160 live texture. Esc suspends; the power switch powers off. */
 public final class GbaScreen extends Screen {
 	private static final Identifier TEX = Identifier.fromNamespaceAndPath("gbalink", "dynamic/screen");
 	private static final int W = GbaNative.WIDTH, H = GbaNative.HEIGHT;
@@ -27,6 +27,8 @@ public final class GbaScreen extends Screen {
 
 	private final EmulatorSession session; // null in message mode
 	private final List<String> message;
+	private static final int SW_W = 40, SW_H = 14;
+	private int swCx, swCy; // power switch centre (GUI px), set while rendering; 0 = not shown
 	private DynamicTexture texture;
 	private int lastSeq = -1;
 	private final byte[] frameCopy = new byte[W * H * 4];
@@ -75,12 +77,39 @@ public final class GbaScreen extends Screen {
 		}
 		int by = height - 24;
 		int cx = width / 2;
+		int bw = Math.min(92, (width - 20 - 3 * 4) / 4), gap = 4;
+		int x0 = cx - (4 * bw + 3 * gap) / 2;
 		addRenderableWidget(Button.builder(Component.literal("Save State (F5)"), b -> session.saveStateAsync())
-			.bounds(cx - 155, by, 100, 18).build());
+			.bounds(x0, by, bw, 18).build());
 		addRenderableWidget(Button.builder(Component.literal("Load State (F8)"), b -> session.loadStateAsync())
-			.bounds(cx - 50, by, 100, 18).build());
+			.bounds(x0 + (bw + gap), by, bw, 18).build());
+		addRenderableWidget(Button.builder(Component.literal("Export .sav"), b -> session.exportSaveAsync())
+			.bounds(x0 + 2 * (bw + gap), by, bw, 18).build());
 		addRenderableWidget(Button.builder(Component.literal("Close (Esc)"), b -> onClose())
-			.bounds(cx + 55, by, 100, 18).build());
+			.bounds(x0 + 3 * (bw + gap), by, bw, 18).build());
+	}
+
+	/** Slide the power switch: save, delete the suspend state, close. */
+	private void powerOff() {
+		if (session == null) return;
+		session.powerOff();
+		onClose();
+	}
+
+	/** Dev/test: centre of the power switch in GUI px (valid after the first render), or null. */
+	public int[] powerSwitchCenter() { return swCx > 0 ? new int[] {swCx, swCy} : null; }
+
+	private boolean overSwitch(double mx, double my) {
+		return session != null && swCx > 0 && Math.abs(mx - swCx) <= SW_W / 2.0 + 1 && Math.abs(my - swCy) <= SW_H / 2.0 + 1;
+	}
+
+	@Override
+	public boolean mouseClicked(net.minecraft.client.input.MouseButtonEvent event, boolean doubleClick) {
+		if (event.button() == InputConstants.MOUSE_BUTTON_LEFT && overSwitch(event.x(), event.y())) {
+			powerOff();
+			return true;
+		}
+		return super.mouseClicked(event, doubleClick);
 	}
 
 	@Override
@@ -94,7 +123,9 @@ public final class GbaScreen extends Screen {
 		}
 		if (sc == InputConstants.KEY_F5) { session.saveStateAsync(); return true; }
 		if (sc == InputConstants.KEY_F8) { session.loadStateAsync(); return true; }
-		if (sc == 43 /* tab */) { session.turbo = true; return true; }
+		if (sc == InputConstants.KEY_P) { powerOff(); return true; }
+		// Space (and Tab) = fast-forward while held. Consumed here so a focused button never activates on Space.
+		if (sc == InputConstants.KEY_SPACE || sc == InputConstants.KEY_TAB) { session.turbo = true; return true; }
 		return super.keyPressed(event);
 	}
 
@@ -104,7 +135,7 @@ public final class GbaScreen extends Screen {
 		int sc = event.key();
 		int bit = bitFor(sc);
 		if (bit >= 0) { session.release(bit); return true; }
-		if (sc == 43) { session.turbo = false; return true; }
+		if (sc == InputConstants.KEY_SPACE || sc == InputConstants.KEY_TAB) { session.turbo = false; return true; }
 		return super.keyReleased(event);
 	}
 
@@ -164,7 +195,12 @@ public final class GbaScreen extends Screen {
 		// screen well
 		g.fill(wellL, sy - wellPad, wellR, sy + dh + wellPad, 0xFF1A1830);
 		g.fill(sx - 3, sy - 3, sx + dw + 3, sy + dh + 3, 0xFF000000);
-		g.centeredText(font, "GAME BOY ADVANCE", width / 2, bodyT + 6, 0xFFD8CCFF);
+		swCx = bodyL + 8 + 44 + 10 + SW_W / 2;
+		swCy = bodyT + 6;
+		boolean room = width / 2 - swCx - SW_W / 2 - 14 >= font.width("GAME BOY ADVANCE") / 2;
+		if (room) g.centeredText(font, "GAME BOY ADVANCE", width / 2, bodyT + 6, 0xFFD8CCFF);
+		else if (width / 2 - swCx < SW_W / 2 + 14) swCx = 0; // no space for the switch at all
+		if (swCx > 0) drawPowerSwitch(g, mouseX, mouseY, room);
 
 		// the live frame
 		if (texture != null && !session.isFinished()) {
@@ -210,6 +246,19 @@ public final class GbaScreen extends Screen {
 		g.blit(RenderPipelines.GUI_TEXTURED, gui(name), cx - gw / 2, cy - gh / 2, 0f, 0f, gw, gh, tw, th, tw, th);
 	}
 
+	private void drawPowerSwitch(GuiGraphicsExtractor g, int mouseX, int mouseY, boolean roomForLabel) {
+		boolean hover = overSwitch(mouseX, mouseY);
+		sprite(g, hover ? "power_off" : "power_on", swCx, swCy, SW_W, SW_H);
+		boolean ok = session.error() == null && !session.isFinished();
+		sprite(g, ok ? "led_green" : "led_red", swCx + SW_W / 2 + 8, swCy, 8, 8);
+		if (hover) {
+			String t = "POWER OFF (P)";
+			if (roomForLabel || font.width(t) / 2 < width / 2 - swCx) {
+				g.text(font, t, swCx - font.width(t) / 2, swCy + SW_H / 2 + 3, 0xFFFFE08A, false);
+			}
+		}
+	}
+
 	private void drawControls(GuiGraphicsExtractor g, int bodyL, int bodyR, int wellL, int wellR, int bodyT, int sy, int dh) {
 		int held = session.heldMask();
 		int midY = sy + dh / 2;
@@ -251,7 +300,7 @@ public final class GbaScreen extends Screen {
 		if (closed) return;
 		closed = true;
 		if (session != null) {
-			session.stopAndWait(1500);
+			session.requestStop(); // suspends in the background; the ack needs this thread, so never block on it
 			if (texture != null) {
 				minecraft.getTextureManager().release(TEX);
 				texture = null;

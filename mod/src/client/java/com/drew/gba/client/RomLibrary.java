@@ -42,6 +42,48 @@ public final class RomLibrary {
 		return baseDir().resolve("roms");
 	}
 
+	public static Path savesDir() { return baseDir().resolve("saves"); }
+	public static Path statesDir() { return baseDir().resolve("states"); }
+	public static Path suspendDir() { return baseDir().resolve("suspend"); }
+	public static Path exportsDir() { return baseDir().resolve("exports"); }
+	public static Path importsDir() { return baseDir().resolve("imports"); }
+
+	private static final String ROMS_README = String.join(System.lineSeparator(),
+		"GBA Link - ROMs folder",
+		"",
+		"Put your own .gba game files here (subfolders one level deep are scanned too).",
+		"Then hold a Blank Game Pak in Minecraft and press G (or right-click) to burn one onto it.",
+		"",
+		"Games are matched by the SHA-1 of the file, so everyone playing the same Game Pak needs the",
+		"exact same ROM file. No games are included with the mod and none are downloaded for you.",
+		"",
+		"Other folders next to this one (gbalink/): imports (put .sav files here to burn a pak with an",
+		"existing save), exports (Export .sav writes here), saves (a local copy of every save),",
+		"suspend and states (your suspended games and F5 save states).",
+		"");
+
+	/** Creates the gbalink folders (and the ROMs README) so they exist from the first start of the game. */
+	public static void ensureFolders() {
+		try {
+			Files.createDirectories(romsDir());
+			Files.createDirectories(importsDir());
+			Path readme = romsDir().resolve("README.txt");
+			if (!Files.exists(readme)) Files.writeString(readme, ROMS_README, StandardCharsets.UTF_8);
+		} catch (IOException | RuntimeException e) {
+			org.slf4j.LoggerFactory.getLogger("gbalink").warn("Could not create the gbalink folders under {}", baseDir(), e);
+		}
+	}
+
+	/** Opens {@code dir} (created if needed) in the OS file manager. */
+	public static void openFolder(Path dir) {
+		try {
+			Files.createDirectories(dir);
+			com.mojang.blaze3d.Blaze3D.openPath(dir);
+		} catch (IOException | RuntimeException e) {
+			org.slf4j.LoggerFactory.getLogger("gbalink").warn("Could not open {}", dir, e);
+		}
+	}
+
 	private static Path indexFile() {
 		return baseDir().resolve("rom_index.json");
 	}

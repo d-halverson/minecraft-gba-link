@@ -68,7 +68,7 @@ public final class AutoTest {
 		this.dir = mc.gameDirectory.toPath().resolve("autotest");
 		String sp = System.getProperty("gbalink.autotest.sync");
 		this.sync = sp == null ? dir.resolve("sync") : Path.of(sp);
-		this.romName = System.getProperty("gbalink.autotest.rom", mode.equals("solo") ? "sram.gba" : "link_n32_" + (mode.equals("A") ? "master" : "slave") + ".gba");
+		this.romName = System.getProperty("gbalink.autotest.rom", mode.equals("qol") ? "counter.gba" : mode.equals("solo") ? "sram.gba" : "link_n32_" + (mode.equals("A") ? "master" : "slave") + ".gba");
 	}
 
 	public static void start() {
@@ -364,8 +364,10 @@ public final class AutoTest {
 	private void run() {
 		try {
 			log("starting scenario " + mode + " rom=" + romName);
+			if (mode.equals("qol")) bootFolders();
 			joinAndWait();
-			if (mode.equals("solo")) solo();
+			if (mode.equals("qol")) qol();
+			else if (mode.equals("solo")) solo();
 			else link();
 			log("SCENARIO COMPLETE: " + mode);
 		} catch (Fail f) {
@@ -453,6 +455,259 @@ public final class AutoTest {
 		waitFor("pak ejected to off hand", 5000, () -> GbaItems.is(mc.player.getItemInHand(InteractionHand.OFF_HAND), GbaItems.PAK)
 			&& GbaItems.insertedPak(mc.player.getInventory().getItem(gbaSlot)) == null);
 		check(true, "pak ejected back to the off hand");
+	}
+
+	// ---- QoL: folders, suspend / power switch, revision guard, export, import ----
+
+	private void bootFolders() {
+		Path base = mc.gameDirectory.toPath().resolve("gbalink");
+		check(Files.isDirectory(base.resolve("roms")), "gbalink/roms exists at game start");
+		check(Files.isRegularFile(base.resolve("roms").resolve("README.txt")), "gbalink/roms/README.txt exists");
+		check(Files.isDirectory(base.resolve("imports")), "gbalink/imports exists at game start");
+	}
+
+	/** Screenshot that is also copied to run/evidence/qol_<name>.png. */
+	private void qolShot(String name) {
+		shot("qol_" + name);
+		copyEvidence(mc.gameDirectory.toPath().resolve("screenshots").resolve("qol_" + name + ".png"), "qol_" + name + ".png");
+	}
+
+	private long counter() {
+		return word(GbaLinkClient.currentSession().debugState().orTimeout(5, TimeUnit.SECONDS).join(), 0);
+	}
+
+	private long wordAt(int off) {
+		return word(GbaLinkClient.currentSession().debugState().orTimeout(5, TimeUnit.SECONDS).join(), off);
+	}
+
+	private void waitCounter(long min) {
+		long end = System.currentTimeMillis() + 30000;
+		while (System.currentTimeMillis() < end) {
+			if (counter() >= min) return;
+			sleep(100);
+		}
+		fail("frame counter never reached " + min);
+	}
+
+	private Path gbalinkDir() {
+		return mc.gameDirectory.toPath().resolve("gbalink");
+	}
+
+	private void clickWidget(String label) {
+		Boolean clicked = main(() -> {
+			for (var c : mc.gui.screen().children()) {
+				if (c instanceof Button b && b.getMessage().getString().startsWith(label)) {
+					return mc.gui.screen().mouseClicked(new MouseButtonEvent(b.getX() + b.getWidth() / 2.0,
+						b.getY() + b.getHeight() / 2.0, new MouseButtonInfo(1, 0)), false);
+				}
+			}
+			return null;
+		});
+		if (clicked == null) fail("no button '" + label + "' on " + main(() -> String.valueOf(mc.gui.screen())));
+	}
+
+	private void clickPowerSwitch() {
+		GbaScreen sc = gbaScreen();
+		EmulatorSession s = GbaLinkClient.currentSession();
+		int[] c = main(sc::powerSwitchCenter);
+		if (c == null) fail("power switch not drawn");
+		log("clicking power switch at " + c[0] + "," + c[1]);
+		main(() -> sc.mouseClicked(new MouseButtonEvent(c[0], c[1], new MouseButtonInfo(1, 0)), false));
+		waitFor("screen closed", 5000, () -> mc.gui.screen() == null);
+		waitFor("session finished", 8000, s::isFinished);
+	}
+
+	private void qol() {
+		giveAndWait(GbaItems.GBA);
+		giveAndWait(GbaItems.BLANK_PAK);
+		burn();
+		PakData pd = insert();
+		Path suspend = gbalinkDir().resolve("suspend").resolve(pd.pakId() + ".state");
+		Path mirror = gbalinkDir().resolve("saves").resolve(pd.pakId() + ".sav");
+		Path serverSave = savePath(pd);
+		check(serverSave != null, "world dir given");
+
+		// 1. cold boot: "Powered on" toast, idle bezel with the power switch
+		openGba();
+		EmulatorSession s1 = GbaLinkClient.currentSession();
+		check(!s1.resumed, "first open is a cold boot");
+		check(s1.toast().contains("Powered on"), "boot toast says Powered on ('" + s1.toast() + "')");
+		GbaScreen scn = gbaScreen();
+		check(main(scn::powerSwitchCenter) != null, "power switch is drawn on the bezel");
+		qolShot("1_toast_poweron");
+		waitCounter(360);
+		sleep(11000); // let a periodic autosave happen too (ack path while running)
+		qolShot("2_bezel_idle");
+		framePng("qol_1_fb");
+		long c1 = counter();
+		log("counter before suspend = " + c1);
+
+		// 2. close = suspend
+		closeGba();
+		waitFor("suspend file", 5000, () -> Files.isRegularFile(suspend));
+		check(Files.isRegularFile(serverSave), "server holds the uploaded save");
+		byte[] onServer = readQuiet(serverSave);
+		var sf = com.drew.gba.save.SuspendFile.decode(readQuiet(suspend));
+		check(sf != null, "suspend file decodes");
+		check(sf.revision().equals(com.drew.gba.save.SaveRules.revision(onServer)), "suspend records the revision AFTER the flush upload (matches server save sha256)");
+		check(sf.confirmed(), "suspend marks the upload as confirmed");
+		check(Arrays.equals(readQuiet(mirror), onServer), "local mirror gbalink/saves/<pak>.sav equals the server save");
+
+		// 3. reopen -> resumes where it was
+		openGba();
+		EmulatorSession s2 = GbaLinkClient.currentSession();
+		check(s2.resumed, "reopen resumed the suspend state");
+		check(s2.toast().contains("Resumed"), "toast says Resumed ('" + s2.toast() + "')");
+		long c2 = counter();
+		log("counter after resume = " + c2);
+		check(c2 >= c1 && c2 < c1 + 400, "frame counter continued (" + c1 + " -> " + c2 + "), not a reboot");
+		qolShot("3_toast_resumed");
+		framePng("qol_2_fb");
+
+		// 4. export .sav
+		sleep(500);
+		clickGbaButton("Export .sav");
+		sleep(800);
+		String t = main(() -> GbaLinkClient.currentSession().toast());
+		check(t.contains("Exported"), "export toast ('" + t + "')");
+		qolShot("4_toast_export");
+		Path exports = gbalinkDir().resolve("exports");
+		long n;
+		try (var st = Files.list(exports)) { n = st.filter(p -> p.toString().endsWith(".sav")).count(); } catch (IOException e) { n = -1; }
+		check(n >= 1, "an exported .sav exists in gbalink/exports (" + n + ")");
+		try (var st = Files.list(exports)) {
+			Path f = st.filter(p -> p.toString().endsWith(".sav")).findFirst().get();
+			check(Files.size(f) == 32768, "exported save is a raw 32768 byte SRAM .sav (" + f.getFileName() + ")");
+		} catch (IOException e) { fail("list exports " + e); }
+		// export read the save: closing must still upload the (now clean-looking) changes
+		waitCounter(c2 + 60);
+
+		// 5. power switch: real power off deletes the suspend state -> next open cold-boots
+		clickPowerSwitch();
+		check(!Files.exists(suspend), "power off deleted the suspend state");
+		openGba();
+		EmulatorSession s3 = GbaLinkClient.currentSession();
+		check(!s3.resumed, "after power off the next open is a cold boot");
+		check(s3.toast().contains("Powered on"), "toast says Powered on again ('" + s3.toast() + "')");
+		long c3 = counter();
+		check(c3 < 200, "frame counter restarted (" + c3 + ")");
+		waitCounter(240);
+
+		// 6. revision guard: the save changes elsewhere while suspended -> suspend discarded
+		closeGba();
+		waitFor("suspend file again", 5000, () -> Files.isRegularFile(suspend));
+		byte[] other = new byte[32768];
+		Arrays.fill(other, (byte) 0x5A);
+		try { Files.write(serverSave, other); } catch (IOException e) { fail("simulate foreign save: " + e); }
+		log("simulated another player's newer save on the server");
+		openGba();
+		EmulatorSession s4 = GbaLinkClient.currentSession();
+		check(!s4.resumed, "suspend discarded because the server save changed");
+		check(s4.toast().contains("Save changed elsewhere"), "toast explains it ('" + s4.toast() + "')");
+		check(wordAt(4) == 0x5A5A5A5AL, "cold boot used the latest server save (cart saw 5A5A5A5A)");
+		qolShot("5_toast_changed_elsewhere");
+		check(!Files.exists(suspend), "stale suspend file was deleted");
+		long c4 = counter();
+		check(c4 < 400, "game restarted (" + c4 + ")");
+
+		// 7. suspend again, unchanged server -> resumes (guard does not trigger needlessly)
+		waitCounter(c4 + 120);
+		closeGba();
+		openGba();
+		check(GbaLinkClient.currentSession().resumed, "unchanged save: resumes again");
+		closeGba();
+
+		// 8. import: burn a second pak with an existing save
+		byte[] imp = new byte[32768];
+		for (int i = 0; i < imp.length; i++) imp[i] = (byte) (i * 7 + 3);
+		imp[0] = (byte) 0xDE; imp[1] = (byte) 0xAD; imp[2] = (byte) 0xBE; imp[3] = (byte) 0xEF;
+		try {
+			Files.createDirectories(gbalinkDir().resolve("imports"));
+			Files.write(gbalinkDir().resolve("imports").resolve("my game.sav"), imp);
+			Files.write(gbalinkDir().resolve("imports").resolve("garbage.sav"), new byte[1234]);
+		} catch (IOException e) { fail("write import file " + e); }
+		giveAndWait(GbaItems.BLANK_PAK);
+		int blank = slotOf(GbaItems.BLANK_PAK);
+		select(blank);
+		use();
+		waitFor("burn screen", 5000, () -> mc.gui.screen() instanceof RomPickerScreen);
+		sleep(1000);
+		qolShot("6_picker");
+		clickWidget("Burn with existing save");
+		waitFor("save picker", 5000, () -> mc.gui.screen() instanceof com.drew.gba.client.ui.SavePickerScreen);
+		sleep(800);
+		qolShot("7_save_picker");
+		Boolean garbageActive = main(() -> {
+			for (var c : mc.gui.screen().children()) if (c instanceof Button b && b.getMessage().getString().startsWith("garbage.sav")) return b.active;
+			return null;
+		});
+		check(Boolean.FALSE.equals(garbageActive), "a garbage-sized .sav is listed but cannot be picked");
+		clickWidget("my game.sav");
+		waitFor("back on the burn screen", 5000, () -> mc.gui.screen() instanceof RomPickerScreen);
+		sleep(600);
+		clickWidget("counter");
+		waitFor("second pak burned", 8000, () -> GbaItems.is(mc.player.getInventory().getItem(blank), GbaItems.PAK));
+		PakData pd2 = main(() -> GbaItems.pakOf(mc.player.getInventory().getItem(blank)));
+		Path save2 = savePath(pd2);
+		waitFor("imported save on the server", 8000, () -> Files.isRegularFile(save2));
+		check(Arrays.equals(readQuiet(save2), imp), "server stored exactly the imported save as the new pak's first save");
+		waitFor("local copy of the import", 5000, () -> Files.isRegularFile(gbalinkDir().resolve("saves").resolve(pd2.pakId() + ".sav")));
+		// a second import into the same pak must be refused: replay through the public path is not possible from the UI,
+		// so this is covered by the unit tests (SaveRules.importRejection)
+		// insert the new pak and boot it: the cartridge must see the imported bytes
+		// (pak 1 is still in the GBA: eject it first)
+		int gbaSlot = slotOf(GbaItems.GBA);
+		select(gbaSlot);
+		sneak(true);
+		use();
+		sneak(false);
+		waitFor("pak 1 ejected", 5000, () -> GbaItems.insertedPak(mc.player.getInventory().getItem(gbaSlot)) == null);
+		PakData pd2b = insertPakById(pd2);
+		openGba();
+		EmulatorSession s5 = GbaLinkClient.currentSession();
+		check(!s5.resumed, "imported pak cold-boots");
+		sleep(500);
+		long seen = wordAt(4);
+		check(seen == 0xEFBEADDEL, String.format("game started with the imported save (cart read %08x)", seen));
+		check(s5.toast().contains("Powered on"), "boot toast on the second pak");
+		closeGba();
+	}
+
+	private void clickGbaButton(String label) {
+		GbaScreen sc = gbaScreen();
+		Boolean clicked = main(() -> {
+			for (var c : sc.children()) {
+				if (c instanceof Button b && b.getMessage().getString().startsWith(label)) {
+					return sc.mouseClicked(new MouseButtonEvent(b.getX() + b.getWidth() / 2.0,
+						b.getY() + b.getHeight() / 2.0, new MouseButtonInfo(1, 0)), false);
+				}
+			}
+			return null;
+		});
+		if (clicked == null) fail("no button '" + label + "' on the GBA screen");
+	}
+
+	/** Moves the pak with this id from the hotbar to the off hand and inserts it into the GBA. */
+	private PakData insertPakById(PakData want) {
+		int slot = main(() -> {
+			for (int i = 0; i < 9; i++) {
+				PakData p = GbaItems.pakOf(mc.player.getInventory().getItem(i));
+				if (p != null && p.pakId().equals(want.pakId())) return i;
+			}
+			return -1;
+		});
+		if (slot < 0) fail("pak " + want.pakId() + " not in the hotbar");
+		select(slot);
+		main(() -> mc.player.connection.send(new ServerboundPlayerActionPacket(
+			ServerboundPlayerActionPacket.Action.SWAP_ITEM_WITH_OFFHAND, BlockPos.ZERO, Direction.DOWN, 0)));
+		waitFor("pak in off hand", 5000, () -> GbaItems.is(mc.player.getItemInHand(InteractionHand.OFF_HAND), GbaItems.PAK));
+		int gba = slotOf(GbaItems.GBA);
+		select(gba);
+		sneak(true);
+		use();
+		sneak(false);
+		waitFor("pak inserted in gba", 5000, () -> GbaItems.insertedPak(mc.player.getInventory().getItem(gba)) != null);
+		return main(() -> GbaItems.insertedPak(mc.player.getInventory().getItem(gba)));
 	}
 
 	private static byte[] readQuiet(Path p) {

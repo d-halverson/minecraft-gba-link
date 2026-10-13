@@ -311,6 +311,84 @@ def make_capsule(gw, gh, bw, bh, base, hi, sh, pressed):
     return shade
 
 
+# ---------------------------------------------------------------- power switch + LED
+SW_W, SW_H = 40, 14
+KNOB_HX, KNOB_HY = 7.2, 5.0
+KNOB_TRAVEL = 9.5   # knob centre offset from the middle: +ON (right) / -OFF (left)
+
+
+def make_switch(on):
+    cx, cy = SW_W / 2.0, SW_H / 2.0
+    hx, hy = 17.0, 3.9
+    kx = cx + (KNOB_TRAVEL if on else -KNOB_TRAVEL)
+    ky = cy - 0.3
+
+    def groove(x, y):
+        return sd_round_box(x - cx, y - cy, hx, hy, hy)
+
+    def knob(x, y):
+        return sd_round_box(x - kx, y - ky, KNOB_HX, KNOB_HY, 2.4)
+
+    def shade(x, y):
+        px = (0, 0, 0, 0)
+        gd = groove(x, y)
+        gc = cov(gd)
+        if gc > 0:
+            t = clamp((y - (cy - hy)) / (2 * hy))
+            face = mix((8, 6, 20), (30, 26, 56), t ** 1.4)        # recessed: dark at the top, light lip below
+            if on:   # a faint green glow on the ON half
+                face = mix(face, (30, 90, 56), 0.35 * smooth(cx, cx + hx, x))
+            depth = -gd
+            face = mix(face, (96, 88, 140), clamp(1 - depth / 0.6) * smooth(0.45, 0.9, t) * 0.8)  # lower lip
+            px = over(px, face, gc)
+        # knob drop shadow on the groove
+        kd = knob(x - 0.5, y - 1.0)
+        px = over(px, (4, 3, 12), 0.55 * (1 - smooth(-1.0, 1.8, kd)) * (1 if gc > 0 else 0.4))
+        d = knob(x, y)
+        c = cov(d)
+        if c <= 0:
+            return px
+        gx, gy = grad(knob, x, y)
+        depth = -d
+        t = clamp((y - (ky - KNOB_HY)) / (2 * KNOB_HY))
+        face = mix((214, 208, 244), (140, 130, 186), t ** 1.1)
+        facing = gx * L[0] + gy * L[1]
+        bev = clamp(1 - depth / 1.2) ** 1.5
+        if facing > 0:
+            face = mix(face, (250, 248, 255), bev * clamp(facing * 1.3) * 0.8)
+        else:
+            face = mix(face, (74, 66, 118), bev * clamp(-facing * 1.3) * 0.8)
+        face = mix(face, (74, 66, 118), clamp(1 - depth / 0.35) * 0.5)
+        for i in range(-2, 3):   # grip ridges
+            rx = kx + i * 2.3
+            line = 1 - smooth(0.12, 0.5, abs(x - rx))
+            hl = 1 - smooth(0.12, 0.5, abs(x - rx - 0.55))
+            face = mix(face, (84, 76, 128), line * 0.6 * smooth(0.0, 1.2, depth))
+            face = mix(face, (246, 244, 255), hl * 0.35 * smooth(0.0, 1.2, depth))
+        return over(px, face, c)
+
+    return shade
+
+
+def make_led(color):
+    cx = cy = 4.0
+    hi = tuple(min(255, v + 90) for v in color)
+
+    def shade(x, y):
+        r = math.hypot(x - cx, y - cy)
+        px = (0, 0, 0, 0)
+        px = over(px, color, 0.30 * (1 - smooth(2.2, 3.9, r)))       # glow
+        px = over(px, (14, 12, 30), cov(r - 3.0))                      # bezel ring
+        core = cov(r - 2.3)
+        t = clamp(math.hypot(x - cx + 0.7, y - cy + 0.8) / 2.6)
+        px = over(px, mix(hi, mul(color, 0.7), t), core)
+        sp = 1 - smooth(0.1, 0.9, math.hypot(x - cx + 0.8, y - cy + 0.9))
+        px = over(px, (255, 255, 255), sp * 0.7 * core)
+        return px
+
+    return shade
+
+
 def main():
     import sys
     only = sys.argv[1:]
@@ -331,6 +409,10 @@ def main():
     render("pill_pressed", 28, 12, make_capsule(28, 12, 22, 6.5, pressed=True, **pill))
     render("shoulder", 44, 10, make_capsule(44, 10, 38, 5.5, pressed=False, **pill))
     lit = dict(base=(196, 186, 240), hi=(244, 240, 255), sh=(120, 108, 176))
+    render("power_on", SW_W, SW_H, make_switch(True))
+    render("power_off", SW_W, SW_H, make_switch(False))
+    render("led_green", 8, 8, make_led((64, 232, 104)))
+    render("led_red", 8, 8, make_led((240, 56, 56)))
     render("shoulder_pressed", 44, 10, make_capsule(44, 10, 38, 5.5, pressed=True, **lit))
 
 

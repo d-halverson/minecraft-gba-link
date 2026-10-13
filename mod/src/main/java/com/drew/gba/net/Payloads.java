@@ -12,7 +12,7 @@ import java.util.UUID;
 
 /** All gbalink custom payloads (see gba/SPEC.md). */
 public final class Payloads {
-	public static final int PROTOCOL = 1;
+	public static final int PROTOCOL = 2;
 	public static final int MAX_SAVE = 512 * 1024;
 	public static final int MAX_CHUNK = 30000;
 	public static final int MAX_LINK = 64;
@@ -40,6 +40,15 @@ public final class Payloads {
 		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
 	}
 
+	/** Initial save for the pak the player just burned (protocol 2). Same chunking as SaveChunk, no pak id needed. */
+	public record ImportChunk(int offset, int total, byte[] bytes) implements CustomPacketPayload {
+		public static final Type<ImportChunk> TYPE = mkType("import_chunk");
+		public static final StreamCodec<RegistryFriendlyByteBuf, ImportChunk> CODEC = StreamCodec.ofMember(
+			(v, b) -> { b.writeVarInt(v.offset); b.writeVarInt(v.total); b.writeByteArray(v.bytes); },
+			b -> new ImportChunk(b.readVarInt(), b.readVarInt(), b.readByteArray(MAX_CHUNK)));
+		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+	}
+
 	public record Close(UUID pakId) implements CustomPacketPayload {
 		public static final Type<Close> TYPE = mkType("close");
 		public static final StreamCodec<RegistryFriendlyByteBuf, Close> CODEC = StreamCodec.ofMember(
@@ -64,11 +73,35 @@ public final class Payloads {
 
 	// ---- S2C ----
 
-	public record Open(UUID pakId, String romSha1, String title, byte[] save) implements CustomPacketPayload {
+	/**
+	 * revision = SHA-256 hex of {@code save} (protocol 2). The field is appended last and decoded tolerantly, so a
+	 * protocol 2 client reading a protocol 1 server's Open gets an empty revision instead of a decode error.
+	 */
+	public record Open(UUID pakId, String romSha1, String title, byte[] save, String revision) implements CustomPacketPayload {
 		public static final Type<Open> TYPE = mkType("open");
 		public static final StreamCodec<RegistryFriendlyByteBuf, Open> CODEC = StreamCodec.ofMember(
-			(v, b) -> { b.writeUUID(v.pakId); b.writeUtf(v.romSha1, 64); b.writeUtf(v.title, 64); b.writeByteArray(v.save); },
-			b -> new Open(b.readUUID(), b.readUtf(64), b.readUtf(64), b.readByteArray(MAX_SAVE)));
+			(v, b) -> { b.writeUUID(v.pakId); b.writeUtf(v.romSha1, 64); b.writeUtf(v.title, 64); b.writeByteArray(v.save); b.writeUtf(v.revision, 64); },
+			b -> new Open(b.readUUID(), b.readUtf(64), b.readUtf(64), b.readByteArray(MAX_SAVE), b.isReadable() ? b.readUtf(64) : ""));
+		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+	}
+
+	/** Server's answer to Hello: its protocol number (old servers never send it). */
+	public record Welcome(int protocol) implements CustomPacketPayload {
+		public static final Type<Welcome> TYPE = mkType("welcome");
+		public static final StreamCodec<RegistryFriendlyByteBuf, Welcome> CODEC = StreamCodec.ofMember(
+			(v, b) -> b.writeVarInt(v.protocol), b -> new Welcome(b.readVarInt()));
+		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+	}
+
+	/**
+	 * Sent after a completed save upload (or import). {@code revision} is the server's save revision now, i.e. the
+	 * SHA-256 of what is stored; {@code accepted} is false if the upload was refused (then revision is unchanged).
+	 */
+	public record SaveAck(UUID pakId, String revision, boolean accepted, String message) implements CustomPacketPayload {
+		public static final Type<SaveAck> TYPE = mkType("save_ack");
+		public static final StreamCodec<RegistryFriendlyByteBuf, SaveAck> CODEC = StreamCodec.ofMember(
+			(v, b) -> { b.writeUUID(v.pakId); b.writeUtf(v.revision, 64); b.writeBoolean(v.accepted); b.writeUtf(v.message, 128); },
+			b -> new SaveAck(b.readUUID(), b.readUtf(64), b.readBoolean(), b.readUtf(128)));
 		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
 	}
 
@@ -104,11 +137,14 @@ public final class Payloads {
 		var c2s = PayloadTypeRegistry.serverboundPlay();
 		c2s.register(Hello.TYPE, Hello.CODEC);
 		c2s.register(SaveChunk.TYPE, SaveChunk.CODEC);
+		c2s.register(ImportChunk.TYPE, ImportChunk.CODEC);
 		c2s.register(Close.TYPE, Close.CODEC);
 		c2s.register(Burn.TYPE, Burn.CODEC);
 		c2s.register(LinkDataC2S.TYPE, LinkDataC2S.CODEC);
 		var s2c = PayloadTypeRegistry.clientboundPlay();
 		s2c.register(Open.TYPE, Open.CODEC);
+		s2c.register(Welcome.TYPE, Welcome.CODEC);
+		s2c.register(SaveAck.TYPE, SaveAck.CODEC);
 		s2c.register(LinkState.TYPE, LinkState.CODEC);
 		s2c.register(LinkDataS2C.TYPE, LinkDataS2C.CODEC);
 	}

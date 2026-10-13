@@ -106,15 +106,38 @@ Only sent to clients where `ServerPlayNetworking.canSend` is true. Vanilla / non
 clients must be able to join and see the items (no new synced registry entries, no custom
 command argument types).
 
-- C2S `hello` {protocol=1} — client announces the mod.
-- S2C `open` {pakId UUID, romSha1 hex, title, saveBytes} — open emulator for this pak.
-  Save may be large: split into `save_chunk` S2C messages if > 512 KB (unlikely).
+Protocol number: **2** (0.2.0). Hello/Welcome carry it; mismatches never crash: the server refuses to `open`
+for a client with a different protocol ("update the mod"), and a client treats a server that sends no `welcome`
+(protocol 1) as unable to do revisions/imports and shows "update the mod". New fields are appended last and
+decoded tolerantly.
+
+- C2S `hello` {protocol} — client announces the mod and its protocol.
+- S2C `welcome` {protocol} — server's protocol (new in 2; only sent if the client can receive it).
+- S2C `open` {pakId UUID, romSha1 hex, title, save bytes, revision} — open emulator for this pak.
+  `revision` (new in 2, appended; "" if absent) = lowercase hex SHA-256 of `save` (a missing save is the hash
+  of zero bytes). The server only sends `open` to protocol-2 clients.
 - C2S `save_chunk` {pakId, offset, total, bytes ≤ 30000} — client uploads save
-  (serverbound payloads are limited to 32 KiB). Server assembles and writes atomically.
+  (serverbound payloads are limited to 32 KiB). Server assembles and writes atomically (at most ~5 saves/s).
+- S2C `save_ack` {pakId, revision, accepted, message} — (new in 2) sent after every completed upload or import.
+  `revision` is the SHA-256 of what the server now stores (unchanged if `accepted` is false). The client
+  computes SHA-256 of what it sent; equal means confirmed. A suspend state records that revision.
+- C2S `import_chunk` {offset, total, bytes ≤ 30000} — (new in 2) initial save for the pak this player just
+  burned. Server accepts it once, within 120 s of the burn, only while the pak has no save, and only with a
+  size of 512 B / 8 / 32 / 64 / 128 KiB (+16 byte RTC footer optional), at most 512 KiB; otherwise it answers
+  with a message (and `save_ack` accepted=false).
 - C2S `close` {pakId}
 - C2S `burn` {romSha1, title, gameCode} — turn a held Blank Game Pak into a Pak for this ROM.
 - S2C `link_state` {playerIndex, playerCount, names[]} — (count < 2 = unplugged)
 - C2S `link_data` {bytes ≤ 64} → server → S2C `link_data` {fromIndex, bytes} to other members.
+
+Revision guard: client-side suspend file `gbalink/suspend/<pakId>.state` = magic, version, revision, ROM SHA-1,
+confirmed flag, core state. On `open` it is resumed only if its revision equals the `open` revision and the ROM
+SHA-1 matches; otherwise it is deleted and the game cold-boots with the server save. On suspend the client
+uploads the save if changed, waits for the `save_ack`, and records the revision from the ack (or the SHA-256 of
+what it sent, flagged unconfirmed, if no ack arrives or the connection is gone).
+
+`gba_get_save` returns mGBA's battery format: the raw SRAM/Flash/EEPROM image, plus a 16-byte RTC footer for
+cartridges with a clock. `gba_get_save` resets the "dirty" flag.
 
 ## Items (vanilla-compatible, no registered items)
 

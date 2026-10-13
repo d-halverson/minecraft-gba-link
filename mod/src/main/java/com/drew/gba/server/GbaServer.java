@@ -2,6 +2,7 @@ package com.drew.gba.server;
 
 import com.drew.gba.GbaItems;
 import com.drew.gba.net.Payloads;
+import com.drew.gba.save.SaveRules;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
@@ -50,6 +51,13 @@ public final class GbaServer {
 	private final Map<UUID, TokenBucket> saveLimit = new HashMap<>();
 	private final Map<UUID, TokenBucket> burnLimit = new HashMap<>();
 	private final Map<UUID, Long> lastSaveWrite = new HashMap<>();
+	private final Map<UUID, SaveAssembler> importAssemblers = new HashMap<>();
+	/** Player -> the pak they just burned and may still import an initial save into. */
+	private final Map<UUID, PendingBurn> pendingBurns = new HashMap<>();
+	/** Protocol number each player's client announced in Hello (absent = no hello yet). */
+	private static final Map<UUID, Integer> clientProtocol = new java.util.concurrent.ConcurrentHashMap<>();
+	private record PendingBurn(UUID pakId, long at) {}
+	private SaveStore store;
 	/** Last link_state sent per player (dedupe). */
 	private final Map<UUID, EffectiveLink.State> lastSent = new HashMap<>();
 	private final Map<UUID, Integer> cableCooldown = new HashMap<>();
@@ -62,7 +70,16 @@ public final class GbaServer {
 	private static GbaServer instance;
 
 	public static void init() {
-		ServerPlayNetworking.registerGlobalReceiver(Payloads.Hello.TYPE, (p, ctx) -> { /* canSend() tracks capability */ });
+		ServerPlayNetworking.registerGlobalReceiver(Payloads.Hello.TYPE, (p, ctx) -> {
+			clientProtocol.put(ctx.player().getUUID(), p.protocol());
+			if (ServerPlayNetworking.canSend(ctx.player(), Payloads.Welcome.TYPE)) {
+				ServerPlayNetworking.send(ctx.player(), new Payloads.Welcome(Payloads.PROTOCOL));
+			}
+			if (p.protocol() != Payloads.PROTOCOL) {
+				LOG.info("{} has GBA Link protocol {} (server: {})", ctx.player().getName().getString(), p.protocol(), Payloads.PROTOCOL);
+			}
+		});
+		ServerPlayNetworking.registerGlobalReceiver(Payloads.ImportChunk.TYPE, (p, ctx) -> with(ctx.server(), s -> s.onImportChunk(ctx.player(), p)));
 		ServerPlayNetworking.registerGlobalReceiver(Payloads.Burn.TYPE, (p, ctx) -> with(ctx.server(), s -> s.onBurn(ctx.player(), p)));
 		ServerPlayNetworking.registerGlobalReceiver(Payloads.SaveChunk.TYPE, (p, ctx) -> with(ctx.server(), s -> s.onSaveChunk(ctx.player(), p)));
 		ServerPlayNetworking.registerGlobalReceiver(Payloads.Close.TYPE, (p, ctx) -> with(ctx.server(), s -> s.onClose(ctx.player(), p)));
@@ -154,10 +171,17 @@ public final class GbaServer {
 			hint(p, "Install the GBA Link client mod to play");
 			return;
 		}
-		byte[] save = readSave(inserted.pakId());
+		Integer proto = clientProtocol.get(p.getUUID());
+		if (proto == null || proto != Payloads.PROTOCOL) {
+			hint(p, proto != null && proto > Payloads.PROTOCOL
+				? "The server's GBA Link mod is older than yours - ask the admin to update it"
+				: "Your GBA Link mod is out of date - update the mod to play");
+			return;
+		}
+		byte[] save = store().read(inserted.pakId());
 		sessions.put(p.getUUID(), inserted.pakId());
 		assemblers.remove(p.getUUID());
-		ServerPlayNetworking.send(p, new Payloads.Open(inserted.pakId(), inserted.sha1(), inserted.title(), save));
+		ServerPlayNetworking.send(p, new Payloads.Open(inserted.pakId(), inserted.sha1(), inserted.title(), save, SaveRules.revision(save)));
 		refreshLink(p.getUUID()); // after Open so the client's session exists when link_state arrives
 	}
 
@@ -182,6 +206,8 @@ public final class GbaServer {
 		UUID id = new UUID(ThreadLocalRandom.current().nextLong(), ThreadLocalRandom.current().nextLong());
 		PakData pak = new PakData(id, sha1, title, PakData.sanitizeCode(b.gameCode()));
 		p.setItemInHand(hand, GbaItems.createPak(pak));
+		pendingBurns.put(p.getUUID(), new PendingBurn(id, System.currentTimeMillis()));
+		importAssemblers.remove(p.getUUID());
 		hint(p, "Burned " + title + " onto a Game Pak");
 		LOG.info("{} burned pak {} ({}, {})", p.getName().getString(), id, title, sha1);
 	}
@@ -192,14 +218,15 @@ public final class GbaServer {
 		return server.getWorldPath(LevelResource.ROOT).resolve("gbalink").resolve("saves");
 	}
 
-	private byte[] readSave(UUID pakId) {
-		Path f = savesDir().resolve(pakId + ".sav");
-		try {
-			if (Files.isRegularFile(f) && Files.size(f) <= Payloads.MAX_SAVE) return Files.readAllBytes(f);
-		} catch (IOException e) {
-			LOG.warn("Could not read save {}", f, e);
+	private SaveStore store() {
+		if (store == null) store = new SaveStore(savesDir());
+		return store;
+	}
+
+	private void ack(ServerPlayer p, UUID pakId, String rev, boolean accepted, String msg) {
+		if (ServerPlayNetworking.canSend(p, Payloads.SaveAck.TYPE)) {
+			ServerPlayNetworking.send(p, new Payloads.SaveAck(pakId, rev, accepted, msg));
 		}
-		return new byte[0];
 	}
 
 	private void onSaveChunk(ServerPlayer p, Payloads.SaveChunk c) {
@@ -219,23 +246,54 @@ public final class GbaServer {
 		if (done == null) return;
 		long now = System.currentTimeMillis();
 		Long last = lastSaveWrite.get(me);
-		if (last != null && now - last < 1000) return; // at most one completed save per second
+		if (last != null && now - last < 200) { // at most ~5 completed saves per second
+			ack(p, c.pakId(), store().revision(c.pakId()), false, "too fast");
+			return;
+		}
 		lastSaveWrite.put(me, now);
 		try {
-			writeAtomic(savesDir().resolve(c.pakId() + ".sav"), done);
+			String rev = store().write(c.pakId(), done);
+			ack(p, c.pakId(), rev, true, "");
 		} catch (IOException e) {
 			LOG.warn("Failed to write save for pak {}", c.pakId(), e);
+			ack(p, c.pakId(), store().revision(c.pakId()), false, "write failed");
 		}
 	}
 
-	static void writeAtomic(Path target, byte[] data) throws IOException {
-		Files.createDirectories(target.getParent());
-		Path tmp = target.resolveSibling(target.getFileName() + ".tmp");
-		Files.write(tmp, data);
+	/** Initial save for the pak just burned. Accepted once, only for that pak, only while it has no save. */
+	private void onImportChunk(ServerPlayer p, Payloads.ImportChunk c) {
+		UUID me = p.getUUID();
+		PendingBurn pb = pendingBurns.get(me);
+		if (pb == null) {
+			hint(p, "Import refused: burn a pak first");
+			return;
+		}
+		SaveAssembler a = importAssemblers.computeIfAbsent(me, k -> new SaveAssembler());
+		byte[] done;
 		try {
-			Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-		} catch (java.nio.file.AtomicMoveNotSupportedException e) {
-			Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+			done = a.accept(c.offset(), c.total(), c.bytes());
+		} catch (IllegalArgumentException e) {
+			importAssemblers.remove(me);
+			return;
+		}
+		if (done == null) return;
+		importAssemblers.remove(me);
+		String why = SaveRules.importRejection(true, System.currentTimeMillis() - pb.at(), store().has(pb.pakId()), done.length);
+		if (why != null) {
+			pendingBurns.remove(me);
+			hint(p, "Import refused: " + why);
+			ack(p, pb.pakId(), store().revision(pb.pakId()), false, why);
+			return;
+		}
+		pendingBurns.remove(me);
+		try {
+			String rev = store().write(pb.pakId(), done);
+			hint(p, "Imported save (" + done.length + " bytes) into the new pak");
+			ack(p, pb.pakId(), rev, true, "");
+			LOG.info("{} imported a {} byte save into pak {}", p.getName().getString(), done.length, pb.pakId());
+		} catch (IOException e) {
+			LOG.warn("Failed to write imported save for pak {}", pb.pakId(), e);
+			hint(p, "Import failed");
 		}
 	}
 
@@ -402,6 +460,9 @@ public final class GbaServer {
 		fastLimit.remove(id);
 		burnLimit.remove(id);
 		lastSaveWrite.remove(id);
+		importAssemblers.remove(id);
+		pendingBurns.remove(id);
+		clientProtocol.remove(id);
 		cableCooldown.remove(id);
 		unlink(id);
 	}

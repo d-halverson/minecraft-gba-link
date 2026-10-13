@@ -12,7 +12,8 @@ A Fabric mod for **Minecraft 26.3**, built on the [mGBA](https://mgba.io/) emula
 * **Real link cable support.** Use a Link Cable on a friend and play multiplayer GBA games together
   (2 to 4 players), for example trading or battling.
 * **Saves live on the server**, inside each Game Pak, so a pak keeps its progress when you hand it to a
-  friend or log in from another computer. Save states (F5 / F8) and fast-forward (Tab) are built in.
+  friend or log in from another computer. Closing the screen suspends your game exactly where it was; save states (F5 / F8), fast-forward
+  (Space or Tab) and .sav export / import are built in.
 * **Easy to host.** One mod jar (plus Fabric API) on the server. Recipes are built into the mod, no
   datapack needed. Players without the mod can still join and see the items; they just can't play.
 * **Bring your own ROMs.** No games, BIOS files or downloads are included or provided by this project.
@@ -38,12 +39,12 @@ textures automatically. To give players *without* the mod nicer textures too, ho
 pack in `server.properties`:
 
 ```properties
-resource-pack=https://example.com/gbalink-resourcepack-0.1.0.zip
+resource-pack=https://example.com/gbalink-resourcepack-0.2.0.zip
 resource-pack-sha1=<sha1 of the zip>
 ```
 
-Get the checksum with `shasum -a 1 gbalink-resourcepack-0.1.0.zip` (macOS/Linux) or
-`certutil -hashfile gbalink-resourcepack-0.1.0.zip SHA1` (Windows). Without the resource pack, vanilla
+Get the checksum with `shasum -a 1 gbalink-resourcepack-0.2.0.zip` (macOS/Linux) or
+`certutil -hashfile gbalink-resourcepack-0.2.0.zip SHA1` (Windows). Without the resource pack, vanilla
 players simply see the plain base items (amethyst shard, iron nugget, copper ingot) with their custom names.
 
 **Vanilla clients can still join.** The mod registers no blocks, items or other registry entries; the
@@ -60,6 +61,8 @@ use one.
 | `/gba unlink` | everyone | Removes your link cable connection |
 
 Saves are stored in the world folder: `world/gbalink/saves/<pak id>.sav`. Back them up with your world.
+Clients and server must run the same protocol: the 0.2.0 mod on one side and 0.1.0 on the other will not
+play together; the player is told to update the mod.
 
 ## Client install
 
@@ -98,8 +101,9 @@ It sets up Minecraft 26.3, Fabric Loader 0.19.5, Fabric API and GBA Link in one 
 
 ## Adding games
 
-Copy your own `.gba` files into the `gbalink/roms/` folder of your game directory. (It is created the
-first time you start the game with the mod.)
+Copy your own `.gba` files into the `gbalink/roms/` folder of your game directory. It is created the
+first time you start Minecraft with the mod (with a short `README.txt` inside), and the burn screen has an
+**Open ROMs folder** button that opens it in your file manager.
 
 | Launcher | ROM folder |
 | --- | --- |
@@ -142,12 +146,50 @@ back in your off hand.
 | A / B | `X` / `Z` |
 | L / R | `A` / `S` |
 | Start / Select | `Enter` / `Backspace` |
-| Fast-forward (hold) | `Tab` |
+| Fast-forward (hold) | `Space` (or `Tab`) |
 | Save state / load state | `F5` / `F8` |
-| Close | `Esc` |
+| Close (suspends the game) | `Esc` |
+| Power off | `P`, or click the power switch on the top edge of the GBA |
 
-Your in-game save (battery save) is uploaded to the server as you play and stored per pak. Save states
-(F5 / F8) are an extra, local snapshot kept on your own computer (`gbalink/states/`).
+**Suspend and power switch.** Closing the GBA screen (`Esc` or the Close button) does not turn the console
+off: it uploads your battery save to the server and writes a *suspend state* to
+`gbalink/suspend/<pak id>.state`. The next time you open that pak the game continues exactly where you left
+it, even after restarting Minecraft (a "Resumed" message appears). Slide the **power switch** (top edge, next
+to the green power LED) or press `P` for a real power off: the save is flushed, the suspend state is deleted,
+and the next open boots the game from scratch ("Powered on").
+
+The suspend state never overrides a newer save. Every save on the server has a revision (the SHA-256 of the
+save file), and a suspend state remembers the revision it was based on. If the pak's save changed somewhere
+else in the meantime (you gave the pak to a friend who played it, or you played it on another computer), the
+suspend state is thrown away and the game starts fresh from the latest save, with the message
+"Save changed elsewhere - started fresh from the latest save".
+
+Your in-game save (battery save) is uploaded to the server as you play and stored per pak. Every
+successful upload is also copied to `gbalink/saves/<pak id>.sav` on your computer as a personal backup.
+Save states (F5 / F8) are an extra, local snapshot kept per pak on your own computer
+(`gbalink/states/<pak id>.state`; a state saved by 0.1.0 under the ROM's checksum is copied over on first use).
+
+**Export a save.** The **Export .sav** button on the GBA screen writes the current battery save to
+`gbalink/exports/<game>-<date>.sav`. These are the emulator's battery files, the same format other emulators
+(mGBA and others) use: 512 B or 8 KiB (EEPROM), 32 KiB (SRAM), 64 or 128 KiB (Flash). For games with a
+real-time clock mGBA appends a 16-byte clock footer; mGBA reads it, other emulators ignore or trim it.
+
+**Import a save.** Put a `.sav` file into `gbalink/imports/`, hold a Blank Game Pak, and in the burn screen
+click **Burn with existing save...**, choose the file, then choose the game. The new pak starts with that save.
+Only the standard sizes (512 B, 8, 32, 64, 128 KiB, each optionally plus 16 bytes of clock footer, never more
+than 512 KiB) are accepted, and the server only takes an import as the very first save of a pak you just burned
+(within two minutes).
+
+**Folders** (all inside `gbalink/` in your game directory):
+
+| Folder | Contents |
+| --- | --- |
+| `roms/` | your `.gba` games (with a `README.txt`) |
+| `imports/` | `.sav` files you want to burn onto a new pak |
+| `exports/` | saves written by Export .sav |
+| `saves/` | automatic local copy of each pak's last uploaded save |
+| `suspend/` | suspended games, one per pak |
+| `states/` | F5 save states, one per pak |
 
 ## Link cable
 
@@ -194,7 +236,7 @@ cd mod
 Results are in `mod/build/libs/`: `gbalink-<version>.jar` and `gbalink-resourcepack-<version>.zip`.
 A jar only contains the natives you built, so build all four platforms for a release (the GitHub
 Actions workflow in `.github/workflows/build.yml` does exactly this and attaches everything to a release
-when you push a tag like `v0.1.0`). On Windows, build the natives with WSL or let CI do it. See
+when you push a tag like `v0.2.0`). On Windows, build the natives with WSL or let CI do it. See
 [`native/README.md`](native/README.md) for details and [`SPEC.md`](SPEC.md) for the design.
 
 The tests (`./gradlew test`, `native/run_tests.sh`) use only small homebrew ROMs generated by
@@ -212,7 +254,7 @@ submodule.
   differ because the replacement (HLE) BIOS is used.
 * Link state is not part of a save state; loading a state or resetting disconnects a transfer in flight.
 * Everyone playing the same pak must have the identical ROM file.
-* Early version (0.1.0): expect rough edges. Please report bugs with your OS, game and what happened.
+* Early version (0.2.0): expect rough edges. Please report bugs with your OS, game and what happened.
 
 ## Credits and license
 

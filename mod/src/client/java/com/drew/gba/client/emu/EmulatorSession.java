@@ -1,6 +1,9 @@
 package com.drew.gba.client.emu;
 
 import com.drew.gba.net.Payloads;
+import com.drew.gba.save.SaveRules;
+import com.drew.gba.save.SuspendFile;
+import com.drew.gba.server.SaveStore;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -28,10 +31,16 @@ public final class EmulatorSession implements Runnable {
 	private static final long SAVE_INTERVAL_NANOS = 10_000_000_000L;
 	private static final int CHUNK = Payloads.MAX_CHUNK;
 
+	/** Everything a session needs to start; built by GbaLinkClient.onOpen. */
+	public record Config(UUID pakId, String title, String romSha1, Path romPath, Path stateFile, Path suspendFile,
+			Path mirrorFile, Path exportDir, byte[] save, String serverRevision, byte[] resumeState, String startToast,
+			int linkIndex, int linkCount, List<String> linkNames) {}
+
 	public final UUID pakId;
 	public final String title;
 	public final Path romPath;
 	public final Path stateFile;
+	private final Config cfg;
 	private final GbaNative natives;
 	private final byte[] initialSave;
 	public final FrameBuffer frames = new FrameBuffer();
@@ -41,6 +50,17 @@ public final class EmulatorSession implements Runnable {
 	private volatile boolean stop;
 	private volatile boolean finished;
 	private volatile String error;
+	private volatile boolean powerOff;
+	/** True if the suspend state was loaded when the session started. */
+	public volatile boolean resumed;
+
+	/** Server save revision we believe is current (set from Open, then from acks), and whether the server confirmed it. */
+	private volatile String currentRev;
+	private volatile boolean revConfirmed = true;
+	private record Inflight(String rev, byte[] bytes, java.util.concurrent.CountDownLatch done) {}
+	private volatile Inflight inflight;
+	/** Emulator thread only: the save was read (clearing the core's dirty flag) but not uploaded yet. */
+	private boolean forceUpload;
 
 	/** Keys held (GBA KEYINPUT bit order) plus a latch so very short taps are never missed. */
 	private volatile int held;
@@ -52,16 +72,17 @@ public final class EmulatorSession implements Runnable {
 	private volatile String toast = "";
 	private volatile long toastUntil;
 
-	public EmulatorSession(GbaNative natives, UUID pakId, String title, Path romPath, Path stateFile, byte[] save,
-			int initLinkIndex, int initLinkCount, List<String> initLinkNames) {
+	public EmulatorSession(GbaNative natives, Config c) {
 		this.natives = natives;
-		this.pakId = pakId;
-		this.title = title;
-		this.romPath = romPath;
-		this.stateFile = stateFile;
-		this.initialSave = save;
+		this.cfg = c;
+		this.pakId = c.pakId();
+		this.title = c.title();
+		this.romPath = c.romPath();
+		this.stateFile = c.stateFile();
+		this.initialSave = c.save();
+		this.currentRev = c.serverRevision();
 		this.link = new LinkPump(m -> sendQuiet(new Payloads.LinkDataC2S(m)), System::nanoTime, LINK_TIMEOUT_NANOS,
-			() -> toast("Link partner not responding - cable unplugged"), initLinkIndex, initLinkCount, initLinkNames);
+			() -> toast("Link partner not responding - cable unplugged"), c.linkIndex(), c.linkCount(), c.linkNames());
 		this.audio = new AudioOut();
 		this.thread = new Thread(this, "gbalink-emulator");
 		this.thread.setDaemon(true);
@@ -85,6 +106,33 @@ public final class EmulatorSession implements Runnable {
 
 	public void saveStateAsync() { commands.add(this::doSaveState); }
 	public void loadStateAsync() { commands.add(this::doLoadState); }
+	public void exportSaveAsync() { commands.add(this::doExport); }
+
+	/** Real power off: the save is flushed, the suspend state is deleted, the next open cold-boots. */
+	public void powerOff() { powerOff = true; stop = true; }
+	public boolean isPoweredOff() { return powerOff; }
+	/** Dev/test: the revision this session currently believes the server holds (and if the server confirmed it). */
+	public String revision() { return currentRev; }
+	public boolean revisionConfirmed() { return revConfirmed; }
+
+	/** Called on the client thread when the server acknowledges (or refuses) a save upload. */
+	public void onSaveAck(String rev, boolean accepted) {
+		Inflight f = inflight;
+		if (f != null && accepted && f.rev().equals(rev)) {
+			try {
+				SaveStore.writeAtomic(cfg.mirrorFile(), f.bytes()); // local backup copy of every successful upload
+			} catch (IOException | RuntimeException e) {
+				LOG.warn("Could not write the local save copy {}", cfg.mirrorFile(), e);
+			}
+		}
+		currentRev = rev; // the server's truth, whatever happened to our upload
+		revConfirmed = true;
+		if (f != null && (!accepted || f.rev().equals(rev))) {
+			inflight = null;
+			f.done().countDown();
+		}
+	}
+
 	public void resetAsync() { commands.add(() -> { core.reset(); toast("Reset"); }); }
 
 	/** Dev/test hook: run something against the core on the emulator thread. */
@@ -146,6 +194,9 @@ public final class EmulatorSession implements Runnable {
 		}
 	}
 
+	/** Ask the thread to finish without waiting for it. */
+	public void requestStop() { stop = true; }
+
 	/** Stop without talking to the server (disconnect). */
 	public void abort() {
 		suppressNet = true;
@@ -159,8 +210,12 @@ public final class EmulatorSession implements Runnable {
 	private GbaCore core;
 
 	private void toast(String s) {
+		toast(s, 3000);
+	}
+
+	private void toast(String s, long ms) {
 		toast = s;
-		toastUntil = System.currentTimeMillis() + 3000;
+		toastUntil = System.currentTimeMillis() + ms;
 	}
 
 	@Override
@@ -173,6 +228,17 @@ public final class EmulatorSession implements Runnable {
 				if (core.loadSave(initialSave) < 0) LOG.warn("Core rejected save for pak {}", pakId);
 				else LOG.info("Loaded {} byte save for pak {}", initialSave.length, pakId);
 			}
+			if (cfg.resumeState() != null) {
+				if (core.loadState(cfg.resumeState())) {
+					resumed = true;
+					toast("Resumed");
+				} else {
+					core.reset();
+					toast("Suspend state could not be loaded - started fresh");
+				}
+			} else if (cfg.startToast() != null && !cfg.startToast().isEmpty()) {
+				toast(cfg.startToast(), 6000);
+			}
 			link.bind(core);
 			link.apply(link.index(), link.count(), link.names());
 			loop();
@@ -181,7 +247,7 @@ public final class EmulatorSession implements Runnable {
 			error = "Emulator error: " + t;
 		} finally {
 			try {
-				if (core != null) flushSave(true);
+				if (core != null) endSession();
 			} catch (Throwable t) {
 				LOG.warn("Final save failed", t);
 			}
@@ -269,17 +335,94 @@ public final class EmulatorSession implements Runnable {
 		}
 	}
 
+	/** Closing: flush the save, then either suspend (default) or power off (delete the suspend state). */
+	private void endSession() {
+		flushSave(true);
+		if (powerOff || error != null) {
+			try {
+				Files.deleteIfExists(cfg.suspendFile());
+			} catch (IOException e) {
+				LOG.warn("Could not delete {}", cfg.suspendFile(), e);
+			}
+			return;
+		}
+		String rev = currentRev;
+		if (rev == null || rev.isEmpty()) return; // server too old to know revisions: no suspend
+		byte[] st = core.saveState();
+		if (st == null) return;
+		try {
+			SaveStore.writeAtomic(cfg.suspendFile(), new SuspendFile(rev, cfg.romSha1(), revConfirmed, st).encode());
+			LOG.info("Suspended pak {} (revision {}, confirmed={})", pakId, rev.substring(0, Math.min(8, rev.length())), revConfirmed);
+		} catch (IOException e) {
+			LOG.warn("Could not write the suspend state {}", cfg.suspendFile(), e);
+		}
+	}
+
+	private void waitInflight(long ms) {
+		Inflight f = inflight;
+		if (f == null) return;
+		try {
+			f.done().await(ms, java.util.concurrent.TimeUnit.MILLISECONDS);
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+		}
+	}
+
+	/** Reads the battery save without losing the "needs upload" state (reading clears the core's dirty flag). */
+	private byte[] readSave() {
+		if (core.saveDirty()) forceUpload = true;
+		return core.getSave();
+	}
+
 	private void flushSave(boolean closing) {
-		if (!core.saveDirty()) return;
-		byte[] save = core.getSave();
-		if (save == null || save.length == 0 || save.length > Payloads.MAX_SAVE || suppressNet) return;
+		if (closing && !suppressNet) waitInflight(3000); // an earlier upload's ack must land before we record the revision
+		if (!forceUpload && !core.saveDirty()) return;
+		byte[] save = readSave();
+		if (save == null || save.length == 0 || save.length > Payloads.MAX_SAVE) { forceUpload = false; return; }
+		String rev = SaveRules.revision(save);
+		if (suppressNet) { // disconnected: the upload cannot happen; the suspend only stays valid if the server save matches
+			currentRev = rev;
+			revConfirmed = false;
+			return;
+		}
+		forceUpload = false;
+		Inflight f = new Inflight(rev, save, new java.util.concurrent.CountDownLatch(1));
+		inflight = f;
 		int off = 0;
 		do {
 			int len = Math.min(CHUNK, save.length - off);
 			sendQuiet(new Payloads.SaveChunk(pakId, off, save.length, Arrays.copyOfRange(save, off, off + len)));
 			off += len;
 		} while (off < save.length);
-		if (!closing) toast("Game saved");
+		if (closing) {
+			// Wait for the ack: only then is the server's revision known to include this save.
+			boolean got = false;
+			try {
+				got = f.done().await(3000, java.util.concurrent.TimeUnit.MILLISECONDS);
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+			}
+			if (!got) { // unconfirmed: record what the server would hold after the upload
+				currentRev = rev;
+				revConfirmed = false;
+			}
+		} else {
+			toast("Game saved");
+		}
+	}
+
+	private void doExport() {
+		byte[] save = readSave();
+		if (save == null || save.length == 0) { toast("This game has no save yet"); return; }
+		String stamp = java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss"));
+		Path out = cfg.exportDir().resolve(SaveRules.safeFileName(title) + "-" + stamp + ".sav");
+		try {
+			SaveStore.writeAtomic(out, save);
+			toast("Exported gbalink/exports/" + out.getFileName(), 5000);
+			LOG.info("Exported save to {}", out);
+		} catch (IOException e) {
+			toast("Export failed: " + e.getMessage());
+		}
 	}
 
 	private void doSaveState() {
