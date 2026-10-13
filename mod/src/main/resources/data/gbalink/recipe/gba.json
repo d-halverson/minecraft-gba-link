@@ -1,0 +1,16 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "pattern": ["AGA", "IRI"],
+  "key": {"A": "minecraft:amethyst_shard", "G": "minecraft:glass_pane", "I": "minecraft:iron_ingot", "R": "minecraft:redstone"},
+  "result": {
+    "id": "minecraft:amethyst_shard",
+    "count": 1,
+    "components": {
+      "minecraft:custom_data": {"gbalink": {"type": "gba"}},
+      "minecraft:item_model": "gbalink:gba",
+      "minecraft:item_name": "Game Boy Advance",
+      "minecraft:max_stack_size": 1
+    }
+  }
+}

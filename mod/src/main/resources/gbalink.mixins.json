@@ -1,0 +1,14 @@
+{
+  "required": true,
+  "package": "com.drew.gba.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "mixins": [
+    "RecipeMapMixin",
+    "RecipeManagerMixin",
+    "ItemStackMixin",
+    "LinkDataFastPathMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

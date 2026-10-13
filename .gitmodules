@@ -1,0 +1,6 @@
+[submodule "native/third_party/mgba"]
+	path = native/third_party/mgba
+	url = https://github.com/mgba-emu/mgba
+[submodule "native/third_party/gba-tests"]
+	path = native/third_party/gba-tests
+	url = https://github.com/jsmolka/gba-tests

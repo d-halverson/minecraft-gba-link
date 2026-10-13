@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "gbalink",
+  "version": "${version}",
+  "name": "GBA Link",
+  "description": "Playable Game Boy Advance with link cables.",
+  "authors": ["Drew Halverson"],
+  "license": "MIT",
+  "environment": "*",
+  "mixins": ["gbalink.mixins.json"],
+  "entrypoints": {
+    "main": ["com.drew.gba.GbaLink"],
+    "client": ["com.drew.gba.client.GbaLinkClient"]
+  },
+  "depends": {
+    "fabricloader": ">=0.19",
+    "fabric-api": "*",
+    "minecraft": "~26.3"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "pattern": ["NRN", "NIN"],
+  "key": {"N": "minecraft:iron_nugget", "R": "minecraft:redstone", "I": "minecraft:iron_ingot"},
+  "result": {
+    "id": "minecraft:iron_nugget",
+    "count": 1,
+    "components": {
+      "minecraft:custom_data": {"gbalink": {"type": "blank_pak"}},
+      "minecraft:item_model": "gbalink:blank_pak",
+      "minecraft:item_name": "Blank Game Pak",
+      "minecraft:max_stack_size": 1
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "pattern": ["CAC", " S "],
+  "key": {"C": "minecraft:copper_ingot", "A": "minecraft:amethyst_shard", "S": "minecraft:string"},
+  "result": {
+    "id": "minecraft:copper_ingot",
+    "count": 1,
+    "components": {
+      "minecraft:custom_data": {"gbalink": {"type": "cable"}},
+      "minecraft:item_model": "gbalink:cable",
+      "minecraft:item_name": "Link Cable",
+      "minecraft:max_stack_size": 16
+    }
+  }
+}

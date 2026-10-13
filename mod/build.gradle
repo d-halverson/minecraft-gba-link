@@ -1,0 +1,98 @@
+plugins {
+	id 'net.fabricmc.fabric-loom' version "${loom_version}"
+}
+
+loom {
+	splitEnvironmentSourceSets()
+	runs {
+		server {
+			vmArgs "-Xmx1G", "-Dgbalink.selftest=1"
+		}
+		// Dev-only end-to-end test clients (see AutoTest). Inert unless -Dgbalink.autotest is set.
+		clientA {
+			client()
+			runDir "run/clientA"
+			programArgs "--username", "TestA", "--quickPlayMultiplayer", "localhost:25599"
+			vmArgs "-Xmx1500M", "-Dgbalink.autotest=" + (System.getProperty("autotestA") ?: "A"), "-Dgbalink.autotest.sync=" + file("run/sync").absolutePath, "-Dgbalink.autotest.world=" + file("run/world").absolutePath, "-Dgbalink.autotest.quit=" + (System.getProperty("autotestQuit") ?: "false")
+		}
+		clientB {
+			client()
+			runDir "run/clientB"
+			programArgs "--username", "TestB", "--quickPlayMultiplayer", "localhost:25599"
+			vmArgs "-Xmx1500M", "-Dgbalink.autotest=" + (System.getProperty("autotestB") ?: "B"), "-Dgbalink.autotest.sync=" + file("run/sync").absolutePath, "-Dgbalink.autotest.world=" + file("run/world").absolutePath, "-Dgbalink.autotest.quit=" + (System.getProperty("autotestQuit") ?: "false")
+		}
+	}
+	mods {
+		gbalink {
+			sourceSet sourceSets.main
+			sourceSet sourceSets.client
+		}
+	}
+}
+
+repositories {
+	mavenCentral()
+}
+
+dependencies {
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+	implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+	testImplementation sourceSets.client.output // GbaNative / GbaCore / LinkPump (no Minecraft classes)
+	testImplementation platform('org.junit:junit-bom:5.11.4')
+	testImplementation 'org.junit.jupiter:junit-jupiter'
+	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+processResources {
+	def version = project.version
+	inputs.property "version", version
+	filesMatching("fabric.mod.json") { expand "version": version }
+}
+
+// Native libraries built by the emulator core (may be absent while developing).
+tasks.register('packNatives', Copy) {
+	from("../dist/natives") { include '**' }
+	into layout.buildDirectory.dir("generated/natives/natives")
+}
+sourceSets.client.resources.srcDir layout.buildDirectory.dir("generated/natives")
+tasks.named('processClientResources') { dependsOn 'packNatives' }
+
+tasks.withType(JavaCompile).configureEach { it.options.release = 25 }
+
+java {
+	sourceCompatibility = JavaVersion.VERSION_25
+	targetCompatibility = JavaVersion.VERSION_25
+}
+
+jar {
+	manifest { attributes 'Enable-Native-Access': 'ALL-UNNAMED' }
+	from('..') {
+		include 'LICENSE', 'THIRD_PARTY_NOTICES.md'
+		into 'META-INF'
+	}
+}
+
+// Optional resource pack with just the item textures/models, so server owners can offer it as a
+// server resource pack and even vanilla (unmodded) clients see the custom item textures.
+// pack_version.resource_major of Minecraft 26.3 is 97 (vanilla packs use min_format/max_format only).
+tasks.register('resourcePackZip', Zip) {
+	group = 'build'
+	description = 'Builds gbalink-resourcepack-<version>.zip (item textures only, for vanilla clients).'
+	archiveBaseName = 'gbalink-resourcepack'
+	archiveVersion = project.version
+	destinationDirectory = layout.buildDirectory.dir('libs')
+	preserveFileTimestamps = false
+	reproducibleFileOrder = true
+	from('resourcepack')
+	from('src/client/resources') {
+		include 'assets/gbalink/items/**', 'assets/gbalink/models/**', 'assets/gbalink/textures/item/**'
+	}
+	from('..') { include 'LICENSE' }
+}
+tasks.named('assemble') { dependsOn 'resourcePackZip' }
+
+test {
+	useJUnitPlatform()
+	jvmArgs '--enable-native-access=ALL-UNNAMED'
+}
