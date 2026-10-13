@@ -178,8 +178,8 @@ You need Git, JDK 25, CMake 3.16+, a C compiler, Python 3, and [Zig](https://zig
 build the Windows and Linux libraries).
 
 ```sh
-git clone --recurse-submodules <this repository's URL> gba-link
-cd gba-link
+git clone --recurse-submodules https://github.com/d-halverson/minecraft-gba-link.git
+cd minecraft-gba-link
 
 # 1. native emulator libraries -> dist/natives/<platform>/
 #    (macOS builds both Intel and Apple Silicon; with zig installed it also builds Windows and Linux)
