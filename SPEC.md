@@ -106,7 +106,7 @@ Only sent to clients where `ServerPlayNetworking.canSend` is true. Vanilla / non
 clients must be able to join and see the items (no new synced registry entries, no custom
 command argument types).
 
-Protocol number: **2** (0.2.0). Hello/Welcome carry it; mismatches never crash: the server refuses to `open`
+Protocol number: **3** (0.3.0; 2 was 0.2.0). Hello/Welcome carry it; mismatches never crash: the server refuses to `open`
 for a client with a different protocol ("update the mod"), and a client treats a server that sends no `welcome`
 (protocol 1) as unable to do revisions/imports and shows "update the mod". New fields are appended last and
 decoded tolerantly.
@@ -141,7 +141,71 @@ cartridges with a clock. `gba_get_save` resets the "dirty" flag.
 
 ## Items (vanilla-compatible, no registered items)
 
-Vanilla base item + components: `custom_data` {gbalink:{type:"gba"|"pak"|"blank_pak"|"cable", ...}},
+Vanilla base item + components: `custom_data` {gbalink:{type:"gba"|"pak"|"blank_pak"|"cable"|"crt", ...}},
 `item_model` "gbalink:<type>", `item_name`, `max_stack_size` 1 (cable may stack).
 Pak data: {pakId UUID, sha1, title, code}. GBA may hold an inserted pak: {pak:{...}}.
 Saves live server-side at `world/gbalink/saves/<pakId>.sav` and travel with the pak item.
+
+## CRT TV (0.3.0, protocol 3)
+
+One placeable item, type `crt` (base item `echo_shard`, inert in vanilla): a 90s Trinitron-style TV in a walnut cabinet on
+casters, with a cube-shaped console + "Game Player" adapter on the open shelf and a controller on the floor in front
+(single model, generic names, no logos). Vanilla base item + components like the others. The cabinet is **2 blocks
+wide, 2 high, 1 deep**. The picture tube is 4:3 (about 1.4 blocks wide); the GBA's 3:2 image fills its width with thin
+dark bars above and below.
+
+**In the world** (no registered blocks/entities): using the CRT item on a block face spawns an `item_display` (item
+model `gbalink:crt_placed`, `item_display:"fixed"`, facing the player) plus two 1x2 `interaction` entities, one per cell,
+all sharing the tags `gbalink_crt` and `gbalink_crt_<crtId>`. The clicked block (the cell above the clicked face) is
+the viewer's left cell, the second cell is on the viewer's right (`(cos Y, sin Y)` for TV yaw Y); all four cells must be
+replaceable (air) and free of players/other TVs. The model is authored in x -16..16 so that the display entity's model
+point (8,8,8) is the centre of the anchor cell; geometry constants live in `com.drew.gba.crt.CrtGeometry` (the screen
+quad is the 3:2 picture rectangle 21.6 x 14.4 units at z 1.6) and are checked against `tools/gen_crt.py`.
+State (crtId, yaw, `part` 0|1, inserted pak on part 0) lives in the interactions' custom data `data.gbalink.crt` and
+persists with the world. A TV with yaw Y has its front facing (-sin Y, cos Y). Punching either interaction (any game
+mode) removes all parts and drops exactly one CRT item with its pak. Vanilla clients see the static TV model.
+
+**Playing:** sneak+use with a Pak in the offhand inserts it (sneak+use, empty offhand, ejects; refused while someone
+plays). Use (not sneaking) → server `crt_open` → the client runs the normal `EmulatorSession` for the pak (same saves,
+revisions, suspend, link cable) but in *CRT mode*: a transparent, non-pausing control screen captures the GBA keys (no
+bezel GUI; Esc leaves = suspends; small hint line), the camera eases towards the screen, and the game renders onto the
+TV in the world (own session: every rendered frame). Only one player can play a CRT at a time (server-enforced). The
+server ends play (`crt_view` state 0 to the player) if the TV is broken or the player walks > 18 blocks away.
+
+**Spectating:** the player's client encodes every 2nd emulated frame (~30 fps, never faster than one per 25 ms even
+when fast-forwarding) with `com.drew.gba.stream.VideoEncoder` and audio (16 kHz mono IMA-ADPCM, 1092 stereo input
+frames = 273 bytes per packet, ~8 KB/s) with `AudioEncoder` on a small encoder thread, and uploads `crt_stream`
+packets (video packets over 30000 bytes are split into parts). The server relays them from the Netty thread (immutable
+routing snapshot, like `link_data`) to modded viewers within `crt_view_distance` (default 48 blocks, same dimension)
+up to `crt_max_viewers` (default 10) per CRT, nearest first, refreshed every second; extra viewers get a "viewer limit
+reached" overlay on the TV. A streamer is limited to ~1 MB/s (token bucket; excess packets are dropped and a keyframe
+is requested). Settings in `config/gbalink.properties` (`crt_max_viewers`, `crt_view_distance`, created with defaults).
+Viewers decode with `VideoDecoder`/`AudioDecoder`, draw onto the TV face (nearest filtering, full bright, subtle
+scanlines) and play the audio on their own 16 kHz stereo line (only the nearest watched TV is heard; linear fall-off,
+silent beyond 24 blocks; stereo pan from the listener's facing; scaled by the master volume). New viewers and decoder
+errors → keyframe request to the streamer (server-side rate limit: at most one per 0.5 s per TV); the encoder also emits
+a keyframe every 60 frames. No input-replay spectating.
+
+Payloads (new in 3):
+- S2C `crt_open` {crtId, pakId, romSha1, title, save, revision, x, y, z, yaw} — like `open`, plus TV placement.
+- C2S `crt_stream` {crtId, seq, kind (0 video, 1 audio), part, parts, bytes ≤ 30000} — a keyframe (up to ~75 KB) is
+  split into several packets with the same seq and `part/parts`; the server forwards them unchanged.
+- S2C `crt_stream` {crtId, seq, kind, part, parts, bytes} — to viewers.
+- C2S `crt_need_keyframe` {crtId} — a viewer could not decode; the server forwards a rate-limited `crt_keyframe_request`.
+- S2C `crt_keyframe_request` {crtId}
+- S2C `crt_view` {crtId, state (0 none/idle, 1 playing, 2 limit reached), playerName, x, y, z, yaw} — viewers
+  learn which TVs are live near them (x,y,z = bottom centre of the anchor cell); also sent when a stream ends. State 0
+  sent to the player who is playing means the server ended their play.
+- C2S `crt_close` {crtId} — the player leaves the TV (the pak `close` follows once the save is flushed).
+
+### Stream codec contract (`com.drew.gba.stream`, pure Java, no Minecraft classes)
+
+```java
+VideoEncoder(): byte[] encode(byte[] rgba /* 240*160*4 */, boolean forceKeyframe) // one packet per frame
+VideoDecoder(): boolean decode(byte[] packet, byte[] rgbaOut)  // false = can't decode, need keyframe
+                boolean needsKeyframe()
+AudioEncoder(): byte[] encode(short[] stereo32k, int frames)   // 32768 Hz stereo in, 16 kHz mono ADPCM out
+AudioDecoder(): int decode(byte[] packet, short[] mono16kOut)  // returns samples written
+```
+Packets are self-describing (header with type/keyframe flag); the decoder keeps state across in-order packets.
+Targets at 30 fps: static ≈ 0, typical ≈ 10–30 KB/s, worst (full-screen scroll/flashes) ≤ ~300 KB/s.

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.0
+
+* **CRT TV.** A new craftable, placeable item (`/gba give crt`): a 90s-style wooden TV cabinet, 2 blocks wide and 2
+  high, with a console, adapter and controller built in. Place it on a block, insert a Game Pak (sneak + right-click),
+  right-click to play on the TV in the world. Esc suspends exactly like the GBA; saves, revisions, suspend and link
+  cable work the same. Punch it to pick it up with the pak. It is made of ordinary display/interaction entities, so it
+  survives restarts and vanilla clients still join (with the optional resource pack they see the model too).
+* **Spectators.** Modded players within `crt_view_distance` (48) blocks watch the game live on the TV at 30 fps with
+  low-quality sound (about 8 KB/s) relayed by the server (nearest first, `crt_max_viewers` = 10, "Viewer limit
+  reached" overlay for the rest). Lossless palette/tile video codec (about 4 to 25 KB/s typical, 285 KB/s worst case),
+  16 kHz IMA-ADPCM audio with distance attenuation and stereo pan. No input replay.
+* New server settings file `config/gbalink.properties` (`crt_max_viewers`, `crt_view_distance`).
+* Network protocol 3 (new `crt_open`, `crt_stream`, `crt_view`, `crt_close`, `crt_keyframe_request`,
+  `crt_need_keyframe`); mismatched client/server versions are told to update the mod.
+* The GBA key handling is shared between the GBA screen and the CRT control screen.
+
 ## 0.2.0
 
 * **Suspend on close.** Closing the GBA screen suspends the game (battery save uploaded, core state saved to

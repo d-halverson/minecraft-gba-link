@@ -5,10 +5,14 @@ A Fabric mod for **Minecraft 26.3**, built on the [mGBA](https://mgba.io/) emula
 
 ![The in-game Game Boy Advance screen](docs/screenshot.png)
 
+![The CRT TV with the console and controller](docs/crt-tv.png)
+
 ## What it is
 
 * **A playable GBA in your inventory.** Craft a Game Boy Advance, burn a game onto a Blank Game Pak,
   insert it, and play in a GBA-shaped screen with sound.
+* **A CRT TV.** Craft a big wooden TV cabinet with a console and controller built in, place it in the world, and play
+  on the TV itself while friends nearby watch the picture and hear the sound (see [CRT TV](#crt-tv)).
 * **Real link cable support.** Use a Link Cable on a friend and play multiplayer GBA games together
   (2 to 4 players), for example trading or battling.
 * **Saves live on the server**, inside each Game Pak, so a pak keeps its progress when you hand it to a
@@ -39,12 +43,12 @@ textures automatically. To give players *without* the mod nicer textures too, ho
 pack in `server.properties`:
 
 ```properties
-resource-pack=https://example.com/gbalink-resourcepack-0.2.0.zip
+resource-pack=https://example.com/gbalink-resourcepack-0.3.0.zip
 resource-pack-sha1=<sha1 of the zip>
 ```
 
-Get the checksum with `shasum -a 1 gbalink-resourcepack-0.2.0.zip` (macOS/Linux) or
-`certutil -hashfile gbalink-resourcepack-0.2.0.zip SHA1` (Windows). Without the resource pack, vanilla
+Get the checksum with `shasum -a 1 gbalink-resourcepack-0.3.0.zip` (macOS/Linux) or
+`certutil -hashfile gbalink-resourcepack-0.3.0.zip SHA1` (Windows). Without the resource pack, vanilla
 players simply see the plain base items (amethyst shard, iron nugget, copper ingot) with their custom names.
 
 **Vanilla clients can still join.** The mod registers no blocks, items or other registry entries; the
@@ -56,12 +60,12 @@ use one.
 
 | Command | Who | What |
 | --- | --- | --- |
-| `/gba give <gba\|blank_pak\|cable> [player]` | operators | Hand out items |
+| `/gba give <gba\|blank_pak\|cable\|crt> [player]` | operators | Hand out items |
 | `/gba info` | everyone | Shows whether your client has the mod and your link status |
 | `/gba unlink` | everyone | Removes your link cable connection |
 
 Saves are stored in the world folder: `world/gbalink/saves/<pak id>.sav`. Back them up with your world.
-Clients and server must run the same protocol: the 0.2.0 mod on one side and 0.1.0 on the other will not
+Clients and server must run the same protocol: the 0.3.0 mod on one side and 0.1.0 on the other will not
 play together; the player is told to update the mod.
 
 ## Client install
@@ -126,9 +130,10 @@ missing. Subfolders (one level deep) are scanned too.
 | Game Boy Advance | `A G A` / `I R I` |
 | Blank Game Pak | `N R N` / `N I N` |
 | Link Cable | `C A C` / `_ S _` |
+| CRT TV | `I I I` / `C T C` / `A R A` |
 
 A = amethyst shard, G = glass pane, I = iron ingot, R = redstone, N = iron nugget, C = copper ingot,
-S = string, `_` = empty. (Operators can also use `/gba give`.)
+S = string, T = tinted glass, `_` = empty. (Operators can also use `/gba give`.)
 
 **Burn a game.** Hold a Blank Game Pak and press **G** (rebindable under Controls, "GBA Link") or
 right-click. Pick one of your ROMs from the list; the pak is now that game. Each burned pak has its own
@@ -191,6 +196,44 @@ than 512 KiB) are accepted, and the server only takes an import as the very firs
 | `suspend/` | suspended games, one per pak |
 | `states/` | F5 save states, one per pak |
 
+## CRT TV
+
+A 90s-style TV in a walnut cabinet, with a game console (cube with a Game Player adapter) on its open shelf and a
+controller on the floor in front. It is a normal vanilla item with a custom model, so vanilla players see the model
+too (with the optional resource pack) but only players with the mod can play or watch.
+
+![Playing on the CRT TV](docs/crt-playing.png)
+
+* **Craft it** (`I I I` / `C T C` / `A R A`: iron ingot, copper ingot, tinted glass, amethyst shard, redstone) or
+  `/gba give crt`.
+* **Place it.** Right-click the top (or side) of a block. The TV is **2 blocks wide, 2 high and 1 deep**: the clicked
+  block is its left cell, the second cell is to the right, and it faces you. All four cells must be free. It is
+  placed in the world as ordinary entities (no new blocks), so it survives restarts. **Punch it** (any game mode) to
+  pick it back up as one CRT item, with the pak still inside. Placing consumes the item in survival.
+* **Insert a game.** Hold a Game Pak in your off hand and **sneak + right-click** the TV; sneak + right-click with an
+  empty off hand ejects it.
+* **Play.** Right-click the TV (stand 3 to 6 blocks away). The camera turns to the screen and the game appears on the
+  TV in the world; the world keeps rendering. Controls are the same as on the GBA (arrows, `X`/`Z`, `A`/`S`, `Enter`,
+  `Backspace`, `Space` fast-forward, `F5`/`F8`, `P` power off) and `Esc` leaves (the game is suspended exactly like
+  closing the GBA). Saves, suspend states and link cables work the same. One player at a time per TV.
+* **Watch.** Modded players within 48 blocks see the live picture on the TV and hear it (low quality, about 8 KB/s).
+  The sound gets quieter with distance (silent beyond 24 blocks), pans left and right, and follows Minecraft's master
+  volume; only the nearest TV is heard. At most 10 players watch one TV (nearest first); others see
+  "Viewer limit reached" on the screen. There is no input replay: spectators only see and hear.
+* **Settings** (server, `config/gbalink.properties`, created on first start):
+
+  ```properties
+  crt_max_viewers=10
+  crt_view_distance=48
+  ```
+
+* **Bandwidth.** The player uploads the picture at 30 fps plus the sound: a still or slowly changing picture is
+  about 8 to 15 KB/s in total, a scrolling game roughly 25 to 40 KB/s, and a worst case (full-screen noise) about 300
+  KB/s (the picture is capped at 285 KB/s and the server drops a streamer that exceeds ~1 MB/s). The server sends that
+  stream once per viewer, so a TV with 10 viewers can cost the server 10 times the upload. Lower `crt_max_viewers` on
+  small connections. Everything is relayed by the server; clients never connect to each other.
+* Clients and servers must both run 0.3.0 (protocol 3): an older client is told to update the mod.
+
 ## Link cable
 
 Hold a Link Cable and **right-click another player** who is within **16 blocks** and also has the mod.
@@ -236,7 +279,7 @@ cd mod
 Results are in `mod/build/libs/`: `gbalink-<version>.jar` and `gbalink-resourcepack-<version>.zip`.
 A jar only contains the natives you built, so build all four platforms for a release (the GitHub
 Actions workflow in `.github/workflows/build.yml` does exactly this and attaches everything to a release
-when you push a tag like `v0.2.0`). On Windows, build the natives with WSL or let CI do it. See
+when you push a tag like `v0.3.0`). On Windows, build the natives with WSL or let CI do it. See
 [`native/README.md`](native/README.md) for details and [`SPEC.md`](SPEC.md) for the design.
 
 The tests (`./gradlew test`, `native/run_tests.sh`) use only small homebrew ROMs generated by
@@ -254,7 +297,9 @@ submodule.
   differ because the replacement (HLE) BIOS is used.
 * Link state is not part of a save state; loading a state or resetting disconnects a transfer in flight.
 * Everyone playing the same pak must have the identical ROM file.
-* Early version (0.2.0): expect rough edges. Please report bugs with your OS, game and what happened.
+* **CRT TV:** one player per TV, spectators must have the mod and be within the view distance; the cabinet's
+  controller and console are decoration (they do nothing).
+* Early version (0.3.0): expect rough edges. Please report bugs with your OS, game and what happened.
 
 ## Credits and license
 

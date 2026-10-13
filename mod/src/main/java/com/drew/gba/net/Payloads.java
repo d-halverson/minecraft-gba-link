@@ -12,7 +12,8 @@ import java.util.UUID;
 
 /** All gbalink custom payloads (see gba/SPEC.md). */
 public final class Payloads {
-	public static final int PROTOCOL = 2;
+	public static final int PROTOCOL = 3;
+	public static final int MAX_STREAM = 30000;
 	public static final int MAX_SAVE = 512 * 1024;
 	public static final int MAX_CHUNK = 30000;
 	public static final int MAX_LINK = 64;
@@ -132,6 +133,76 @@ public final class Payloads {
 		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
 	}
 
+	// ---- CRT TV (protocol 3) ----
+
+	/** C2S: one packet of the streamer's video (kind 0) or audio (kind 1); big frames are split into parts. */
+	public record CrtStreamC2S(UUID crtId, int seq, int kind, int part, int parts, byte[] bytes) implements CustomPacketPayload {
+		public static final Type<CrtStreamC2S> TYPE = mkType("crt_stream");
+		public static final StreamCodec<RegistryFriendlyByteBuf, CrtStreamC2S> CODEC = StreamCodec.ofMember(
+			(v, b) -> { b.writeUUID(v.crtId); b.writeVarInt(v.seq); b.writeVarInt(v.kind); b.writeVarInt(v.part); b.writeVarInt(v.parts); b.writeByteArray(v.bytes); },
+			b -> new CrtStreamC2S(b.readUUID(), b.readVarInt(), b.readVarInt(), b.readVarInt(), b.readVarInt(), b.readByteArray(MAX_STREAM)));
+		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+	}
+
+	/** C2S: the streamer stops playing the CRT. */
+	public record CrtClose(UUID crtId) implements CustomPacketPayload {
+		public static final Type<CrtClose> TYPE = mkType("crt_close");
+		public static final StreamCodec<RegistryFriendlyByteBuf, CrtClose> CODEC = StreamCodec.ofMember(
+			(v, b) -> b.writeUUID(v.crtId), b -> new CrtClose(b.readUUID()));
+		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+	}
+
+	/** C2S: a viewer could not decode; the server forwards a (rate-limited) keyframe request to the streamer. */
+	public record CrtNeedKeyframe(UUID crtId) implements CustomPacketPayload {
+		public static final Type<CrtNeedKeyframe> TYPE = mkType("crt_need_keyframe");
+		public static final StreamCodec<RegistryFriendlyByteBuf, CrtNeedKeyframe> CODEC = StreamCodec.ofMember(
+			(v, b) -> b.writeUUID(v.crtId), b -> new CrtNeedKeyframe(b.readUUID()));
+		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+	}
+
+	/** S2C: like Open, plus where the TV is (x,y,z = bottom centre of the TV, yaw = direction its front faces). */
+	public record CrtOpen(UUID crtId, UUID pakId, String romSha1, String title, byte[] save, String revision,
+			double x, double y, double z, float yaw) implements CustomPacketPayload {
+		public static final Type<CrtOpen> TYPE = mkType("crt_open");
+		public static final StreamCodec<RegistryFriendlyByteBuf, CrtOpen> CODEC = StreamCodec.ofMember(
+			(v, b) -> {
+				b.writeUUID(v.crtId); b.writeUUID(v.pakId); b.writeUtf(v.romSha1, 64); b.writeUtf(v.title, 64);
+				b.writeByteArray(v.save); b.writeUtf(v.revision, 64);
+				b.writeDouble(v.x); b.writeDouble(v.y); b.writeDouble(v.z); b.writeFloat(v.yaw);
+			},
+			b -> new CrtOpen(b.readUUID(), b.readUUID(), b.readUtf(64), b.readUtf(64), b.readByteArray(MAX_SAVE), b.readUtf(64),
+				b.readDouble(), b.readDouble(), b.readDouble(), b.readFloat()));
+		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+	}
+
+	/** S2C: relayed stream packet for viewers. */
+	public record CrtStreamS2C(UUID crtId, int seq, int kind, int part, int parts, byte[] bytes) implements CustomPacketPayload {
+		public static final Type<CrtStreamS2C> TYPE = mkType("crt_stream");
+		public static final StreamCodec<RegistryFriendlyByteBuf, CrtStreamS2C> CODEC = StreamCodec.ofMember(
+			(v, b) -> { b.writeUUID(v.crtId); b.writeVarInt(v.seq); b.writeVarInt(v.kind); b.writeVarInt(v.part); b.writeVarInt(v.parts); b.writeByteArray(v.bytes); },
+			b -> new CrtStreamS2C(b.readUUID(), b.readVarInt(), b.readVarInt(), b.readVarInt(), b.readVarInt(), b.readByteArray(MAX_STREAM)));
+		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+	}
+
+	/** S2C: asks the streamer for a keyframe. */
+	public record CrtKeyframeRequest(UUID crtId) implements CustomPacketPayload {
+		public static final Type<CrtKeyframeRequest> TYPE = mkType("crt_keyframe_request");
+		public static final StreamCodec<RegistryFriendlyByteBuf, CrtKeyframeRequest> CODEC = StreamCodec.ofMember(
+			(v, b) -> b.writeUUID(v.crtId), b -> new CrtKeyframeRequest(b.readUUID()));
+		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+	}
+
+	public static final int VIEW_NONE = 0, VIEW_PLAYING = 1, VIEW_LIMIT = 2;
+
+	/** S2C: state of a TV for this viewer (0 none/idle, 1 playing, 2 viewer limit reached). Also ends the player's own play. */
+	public record CrtView(UUID crtId, int state, String playerName, double x, double y, double z, float yaw) implements CustomPacketPayload {
+		public static final Type<CrtView> TYPE = mkType("crt_view");
+		public static final StreamCodec<RegistryFriendlyByteBuf, CrtView> CODEC = StreamCodec.ofMember(
+			(v, b) -> { b.writeUUID(v.crtId); b.writeVarInt(v.state); b.writeUtf(v.playerName, 64); b.writeDouble(v.x); b.writeDouble(v.y); b.writeDouble(v.z); b.writeFloat(v.yaw); },
+			b -> new CrtView(b.readUUID(), b.readVarInt(), b.readUtf(64), b.readDouble(), b.readDouble(), b.readDouble(), b.readFloat()));
+		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+	}
+
 	/** Register all payload types (call from the common initializer on both sides). */
 	public static void register() {
 		var c2s = PayloadTypeRegistry.serverboundPlay();
@@ -141,11 +212,18 @@ public final class Payloads {
 		c2s.register(Close.TYPE, Close.CODEC);
 		c2s.register(Burn.TYPE, Burn.CODEC);
 		c2s.register(LinkDataC2S.TYPE, LinkDataC2S.CODEC);
+		c2s.register(CrtStreamC2S.TYPE, CrtStreamC2S.CODEC);
+		c2s.register(CrtClose.TYPE, CrtClose.CODEC);
+		c2s.register(CrtNeedKeyframe.TYPE, CrtNeedKeyframe.CODEC);
 		var s2c = PayloadTypeRegistry.clientboundPlay();
 		s2c.register(Open.TYPE, Open.CODEC);
 		s2c.register(Welcome.TYPE, Welcome.CODEC);
 		s2c.register(SaveAck.TYPE, SaveAck.CODEC);
 		s2c.register(LinkState.TYPE, LinkState.CODEC);
 		s2c.register(LinkDataS2C.TYPE, LinkDataS2C.CODEC);
+		s2c.register(CrtOpen.TYPE, CrtOpen.CODEC);
+		s2c.register(CrtStreamS2C.TYPE, CrtStreamS2C.CODEC);
+		s2c.register(CrtKeyframeRequest.TYPE, CrtKeyframeRequest.CODEC);
+		s2c.register(CrtView.TYPE, CrtView.CODEC);
 	}
 }

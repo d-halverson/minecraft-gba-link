@@ -1,8 +1,11 @@
 package com.drew.gba.client;
 
 import com.drew.gba.GbaItems;
+import com.drew.gba.client.crt.CrtClient;
+import com.drew.gba.client.crt.CrtStreamer;
 import com.drew.gba.client.emu.EmulatorSession;
 import com.drew.gba.client.emu.GbaNative;
+import com.drew.gba.client.ui.CrtScreen;
 import com.drew.gba.client.ui.GbaScreen;
 import com.drew.gba.client.ui.RomPickerScreen;
 import com.drew.gba.net.Payloads;
@@ -56,6 +59,14 @@ public class GbaLinkClient implements ClientModInitializer {
 			KeyMapping.Category.register(Identifier.fromNamespaceAndPath("gbalink", "main"))));
 
 		ClientPlayNetworking.registerGlobalReceiver(Payloads.Open.TYPE, (p, ctx) -> onOpen(ctx.client(), p));
+		CrtClient.init();
+		ClientPlayNetworking.registerGlobalReceiver(Payloads.CrtOpen.TYPE, (p, ctx) -> onCrtOpen(ctx.client(), p));
+		ClientPlayNetworking.registerGlobalReceiver(Payloads.CrtView.TYPE, (p, ctx) -> CrtClient.onView(p));
+		ClientPlayNetworking.registerGlobalReceiver(Payloads.CrtStreamS2C.TYPE, (p, ctx) -> CrtClient.onStream(p));
+		ClientPlayNetworking.registerGlobalReceiver(Payloads.CrtKeyframeRequest.TYPE, (p, ctx) -> {
+			EmulatorSession s = current;
+			if (s != null && s.streamer() != null) s.streamer().requestKeyframe();
+		});
 		ClientPlayNetworking.registerGlobalReceiver(Payloads.Welcome.TYPE, (p, ctx) -> {
 			serverProtocol = p.protocol();
 			if (p.protocol() > Payloads.PROTOCOL) {
@@ -84,11 +95,13 @@ public class GbaLinkClient implements ClientModInitializer {
 			linkCount = 0;
 			linkNames = List.of();
 			serverProtocol = 0;
+			CrtClient.reset();
 			if (ClientPlayNetworking.canSend(Payloads.Hello.TYPE)) {
 				ClientPlayNetworking.send(new Payloads.Hello(Payloads.PROTOCOL));
 			}
 		});
 		ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
+			CrtClient.reset();
 			EmulatorSession s = current;
 			if (s != null) {
 				s.abort();
@@ -127,6 +140,15 @@ public class GbaLinkClient implements ClientModInitializer {
 	}
 
 	private static void onOpen(Minecraft client, Payloads.Open p) {
+		openGame(client, p.pakId(), p.romSha1(), p.title(), p.save(), p.revision(), null);
+	}
+
+	private static void onCrtOpen(Minecraft client, Payloads.CrtOpen p) {
+		openGame(client, p.pakId(), p.romSha1(), p.title(), p.save(), p.revision(), p);
+	}
+
+	/** Shared by the GBA item and the CRT TV: prepare the session (resume / save revision guard) and show its screen. */
+	private static void openGame(Minecraft client, UUID pakId, String romSha1, String title, byte[] save, String revision, Payloads.CrtOpen crt) {
 		Path gameDir = FabricLoader.getInstance().getGameDir();
 		EmulatorSession old = current;
 		if (old != null) {
@@ -138,34 +160,38 @@ public class GbaLinkClient implements ClientModInitializer {
 			fin.stopAndWait(3500); // its suspend state must be on disk before we decide whether to resume
 			closing = null;
 		}
-		if (p.revision().isEmpty()) { // protocol 1 server: it cannot tell us save revisions
-			closeOnServer(p.pakId());
+		if (revision.isEmpty()) { // protocol 1 server: it cannot tell us save revisions
+			closeOnServer(pakId, crt);
 			client.gui.setScreen(new GbaScreen(List.of("This server's GBA Link mod is out of date.", "Ask the admin to update the mod.")));
 			return;
 		}
-		RomLibrary.Rom rom = RomLibrary.findBySha1(p.romSha1());
+		RomLibrary.Rom rom = RomLibrary.findBySha1(romSha1);
 		if (rom == null) {
-			closeOnServer(p.pakId());
-			client.gui.setScreen(new GbaScreen(List.of("You don't have this game (" + p.title() + ").",
+			closeOnServer(pakId, crt);
+			client.gui.setScreen(new GbaScreen(List.of("You don't have this game (" + title + ").",
 				"Put the .gba file in .minecraft/gbalink/roms/")));
 			return;
 		}
 		GbaNative natives = GbaNative.get(gameDir);
 		if (natives == null) {
-			closeOnServer(p.pakId());
+			closeOnServer(pakId, crt);
 			client.gui.setScreen(new GbaScreen(List.of(GbaNative.loadError() == null ? "Emulator unavailable." : GbaNative.loadError(),
 				"Platform: " + GbaNative.platform())));
 			return;
 		}
-		Path state = migrateState(p.pakId(), rom.sha1());
-		Path suspend = RomLibrary.suspendDir().resolve(p.pakId() + ".state");
-		Resume r = planResume(suspend, p.revision(), rom.sha1());
-		EmulatorSession s = new EmulatorSession(natives, new EmulatorSession.Config(p.pakId(), p.title(), rom.sha1(), rom.path(),
-			state, suspend, RomLibrary.savesDir().resolve(p.pakId() + ".sav"), RomLibrary.exportsDir(), p.save(), p.revision(),
+		Path state = migrateState(pakId, rom.sha1());
+		Path suspend = RomLibrary.suspendDir().resolve(pakId + ".state");
+		Resume r = planResume(suspend, revision, rom.sha1());
+		EmulatorSession s = new EmulatorSession(natives, new EmulatorSession.Config(pakId, title, rom.sha1(), rom.path(),
+			state, suspend, RomLibrary.savesDir().resolve(pakId + ".sav"), RomLibrary.exportsDir(), save, revision,
 			r.state, r.toast, linkIndex, linkCount, linkNames));
 		current = s;
+		if (crt != null) {
+			CrtClient.beginOwn(crt.crtId(), crt.x(), crt.y(), crt.z(), crt.yaw(), s);
+			s.attachStreamer(new CrtStreamer(crt.crtId()));
+		}
 		s.start();
-		client.gui.setScreen(new GbaScreen(s));
+		client.gui.setScreen(crt != null ? new CrtScreen(s, crt.crtId()) : new GbaScreen(s));
 	}
 
 	private record Resume(byte[] state, String toast) {}
@@ -249,8 +275,9 @@ public class GbaLinkClient implements ClientModInitializer {
 		} while (off < importSave.length);
 	}
 
-	private static void closeOnServer(UUID pakId) {
+	private static void closeOnServer(UUID pakId, Payloads.CrtOpen crt) {
 		try {
+			if (crt != null) ClientPlayNetworking.send(new Payloads.CrtClose(crt.crtId()));
 			ClientPlayNetworking.send(new Payloads.Close(pakId));
 		} catch (Throwable ignored) {
 		}

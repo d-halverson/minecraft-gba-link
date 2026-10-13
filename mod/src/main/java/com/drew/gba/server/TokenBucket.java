@@ -11,7 +11,7 @@ public final class TokenBucket {
 		this(capacity, perSecond, System.nanoTime());
 	}
 
-	TokenBucket(double capacity, double perSecond, long startNanos) {
+	public TokenBucket(double capacity, double perSecond, long startNanos) {
 		this.capacity = capacity;
 		this.perNano = perSecond / 1e9;
 		this.tokens = capacity;

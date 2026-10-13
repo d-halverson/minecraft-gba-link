@@ -24,12 +24,13 @@ public final class GbaItems {
 	public static final String BLANK_PAK = "blank_pak";
 	public static final String PAK = "pak";
 	public static final String CABLE = "cable";
+	public static final String CRT = "crt";
 	public static final String ROOT = "gbalink";
 
 	private GbaItems() {}
 
 	public static boolean isType(String type) {
-		return GBA.equals(type) || BLANK_PAK.equals(type) || PAK.equals(type) || CABLE.equals(type);
+		return GBA.equals(type) || BLANK_PAK.equals(type) || PAK.equals(type) || CABLE.equals(type) || CRT.equals(type);
 	}
 
 	private static Item baseItem(String type) {
@@ -37,6 +38,7 @@ public final class GbaItems {
 			case GBA -> Items.AMETHYST_SHARD;
 			case BLANK_PAK -> Items.IRON_NUGGET;
 			case PAK -> Items.IRON_NUGGET;
+			case CRT -> Items.ECHO_SHARD; // inert in vanilla: not placeable, not usable
 			default -> Items.COPPER_INGOT;
 		};
 	}
@@ -46,6 +48,7 @@ public final class GbaItems {
 			case GBA -> "Game Boy Advance";
 			case BLANK_PAK -> "Blank Game Pak";
 			case PAK -> "Game Pak";
+			case CRT -> "CRT TV";
 			default -> "Link Cable";
 		});
 	}
@@ -126,10 +129,12 @@ public final class GbaItems {
 		return is(pak, PAK) ? readPak(data(pak)) : null;
 	}
 
-	/** Pak inserted in a GBA item, or null. */
+	/** Pak inserted in a GBA or CRT item, or null. */
 	public static PakData insertedPak(ItemStack gba) {
 		CompoundTag g = data(gba);
-		if (g == null || !GBA.equals(g.getStringOr("type", null))) return null;
+		if (g == null) return null;
+		String t = g.getStringOr("type", null);
+		if (!GBA.equals(t) && !CRT.equals(t)) return null;
 		return readPak(g.getCompound("pak").orElse(null));
 	}
 
@@ -144,6 +149,18 @@ public final class GbaItems {
 		s.set(DataComponents.LORE, new ItemLore(List.of(
 			Component.literal(p.title().isEmpty() ? "Unknown game" : p.title()).withColor(0xC8B6FF),
 			Component.literal(p.code()).withColor(0x808080))));
+		return s;
+	}
+
+	/** Pak compound for storing inside other data (CRT entity state). */
+	public static CompoundTag pakToTag(PakData p) { return pakTag(p); }
+
+	public static PakData pakFromTag(CompoundTag t) { return readPak(t); }
+
+	/** CRT item, optionally with a pak inside (picked up from a placed TV). */
+	public static ItemStack createCrt(PakData pak) {
+		ItemStack s = create(CRT);
+		if (pak != null) insertPak(s, pak);
 		return s;
 	}
 

@@ -1,7 +1,10 @@
 package com.drew.gba.client;
 
 import com.drew.gba.GbaItems;
+import java.util.UUID;
 import com.drew.gba.client.emu.EmulatorSession;
+import com.drew.gba.client.crt.CrtClient;
+import com.drew.gba.client.ui.CrtScreen;
 import com.drew.gba.client.ui.GbaScreen;
 import com.drew.gba.client.ui.RomPickerScreen;
 import com.drew.gba.net.Payloads;
@@ -68,7 +71,7 @@ public final class AutoTest {
 		this.dir = mc.gameDirectory.toPath().resolve("autotest");
 		String sp = System.getProperty("gbalink.autotest.sync");
 		this.sync = sp == null ? dir.resolve("sync") : Path.of(sp);
-		this.romName = System.getProperty("gbalink.autotest.rom", mode.equals("qol") ? "counter.gba" : mode.equals("solo") ? "sram.gba" : "link_n32_" + (mode.equals("A") ? "master" : "slave") + ".gba");
+		this.romName = System.getProperty("gbalink.autotest.rom", mode.startsWith("crt") && !mode.equals("crtmodel") ? "shades.gba" : mode.equals("qol") ? "counter.gba" : mode.equals("solo") ? "sram.gba" : "link_n32_" + (mode.equals("A") ? "master" : "slave") + ".gba");
 	}
 
 	public static void start() {
@@ -169,7 +172,8 @@ public final class AutoTest {
 		try {
 			done.get(15, TimeUnit.SECONDS);
 			log("screenshot screenshots/" + name + ".png");
-			copyEvidence(mc.gameDirectory.toPath().resolve("screenshots").resolve(name + ".png"), mc.getUser().getName() + "_" + romName.replace(".gba", "") + "_" + name + ".png");
+			copyEvidence(mc.gameDirectory.toPath().resolve("screenshots").resolve(name + ".png"),
+				name.startsWith("crt_") ? name + ".png" : mc.getUser().getName() + "_" + romName.replace(".gba", "") + "_" + name + ".png");
 		} catch (Exception e) {
 			fail("screenshot " + name + ": " + e);
 		}
@@ -366,7 +370,11 @@ public final class AutoTest {
 			log("starting scenario " + mode + " rom=" + romName);
 			if (mode.equals("qol")) bootFolders();
 			joinAndWait();
-			if (mode.equals("qol")) qol();
+			if (mode.equals("crtmodel")) crtModel();
+			else if (mode.equals("crtA")) crtPlayer(false);
+			else if (mode.equals("crtA2")) crtPlayer(true);
+			else if (mode.equals("crtB") || mode.equals("crtC")) crtViewer();
+			else if (mode.equals("qol")) qol();
 			else if (mode.equals("solo")) solo();
 			else link();
 			log("SCENARIO COMPLETE: " + mode);
@@ -381,6 +389,252 @@ public final class AutoTest {
 			log("quitting client");
 			mc.submit(() -> mc.stop());
 		}
+	}
+
+	// ------------------------------------------------------------------ CRT scenarios
+
+	private void tp(double x, double y, double z, float yaw, float pitch) {
+		command(String.format(java.util.Locale.ROOT, "tp @s %.2f %.2f %.2f %.1f %.1f", x, y, z, yaw, pitch));
+		sleep(700);
+	}
+
+	private void clearClutter() {
+		main(() -> { mc.gui.hud.getChat().clearMessages(true); mc.gui.toastManager().clear(); });
+		sleep(500);
+	}
+
+	private boolean guiHidden;
+
+	private void hideGui(boolean h) {
+		if (h != guiHidden) main(() -> mc.gui.hud.toggle());
+		guiHidden = h;
+		sleep(300);
+	}
+
+	/** Model preview shots of the placed TV from several angles, plus inventory and held views. */
+	private void crtModel() {
+		final String P = "crt_model_v3_";
+		giveAndWait(GbaItems.CRT);
+		BlockPos at = main(() -> mc.player.blockPosition());
+		double gy = at.getY();
+		double tx = at.getX() + 6.0, tz = at.getZ() + 0.5; // middle of the 2-wide TV
+		command("time set noon");
+		command("weather clear");
+		command("difficulty peaceful");
+		command("kill @e[type=!minecraft:player,type=!minecraft:interaction,type=!minecraft:item_display]");
+		command("kill @e[type=minecraft:interaction,distance=..40]");
+		command("kill @e[type=minecraft:item_display,distance=..40]");
+		tp(tx + 0.5, gy, tz - 5.0, 0f, 25f);
+		select(slotOf(GbaItems.CRT));
+		BlockPos floor = new BlockPos(at.getX() + 6, at.getY() - 1, at.getZ());
+		main(() -> mc.gameMode.useItemOn(mc.player, InteractionHand.MAIN_HAND,
+			new net.minecraft.world.phys.BlockHitResult(new net.minecraft.world.phys.Vec3(floor.getX() + 0.5, gy, floor.getZ() + 0.5), Direction.UP, floor, false)));
+		sleep(1500);
+		tp(tx + 1.2, gy, tz - 4.0, 0f, 20f);
+		clearClutter();
+		shot(P + "first_person");
+		hideGui(true);
+		tp(tx, gy, tz - 6.2, 0f, 8f);
+		shot(P + "front");
+		tp(tx + 4.4, gy, tz - 4.4, 45f, 8f);
+		shot(P + "front_left");
+		tp(tx - 4.4, gy, tz - 4.4, -45f, 8f);
+		shot(P + "front_right");
+		tp(tx + 6.0, gy, tz, 90f, 8f);
+		shot(P + "side");
+		tp(tx, gy + 3.5, tz - 5.5, 0f, 30f);
+		shot(P + "above");
+		tp(tx, gy, tz + 6.2, 180f, 8f);
+		shot(P + "back");
+		tp(tx, gy, tz - 3.4, 0f, 5f);
+		shot(P + "close_up_front");
+		tp(tx - 2.0, gy, tz - 6.0, -10f, 6f);
+		shot(P + "six_blocks_away");
+		hideGui(false);
+		tp(tx + 1.0, gy, tz - 5.0, 0f, 25f);
+		main(() -> { mc.options.guiScale().set(4); mc.resizeGui(); });
+		sleep(500);
+		main(() -> mc.gui.setScreen(new net.minecraft.client.gui.screens.inventory.InventoryScreen(mc.player)));
+		sleep(800);
+		shot(P + "inventory");
+		main(() -> mc.gui.setScreen(null));
+	}
+
+	private net.minecraft.world.entity.Interaction findCrtEntity() {
+		return main(() -> {
+			net.minecraft.world.entity.Interaction best = null;
+			for (net.minecraft.world.entity.Entity e : mc.level.entitiesForRendering()) {
+				if (e instanceof net.minecraft.world.entity.Interaction i && (best == null || i.distanceTo(mc.player) < best.distanceTo(mc.player))) best = i;
+			}
+			return best;
+		});
+	}
+
+	private void interactCrt(boolean sneak) {
+		net.minecraft.world.entity.Interaction e = findCrtEntity();
+		if (e == null) fail("no CRT interaction entity visible");
+		if (sneak) sneak(true);
+		main(() -> mc.gameMode.interact(mc.player, e, new EntityHitResult(e), InteractionHand.MAIN_HAND));
+		sleep(400);
+		if (sneak) sneak(false);
+	}
+
+	private Path crtPosFile() { return sync.resolve("crt.pos"); }
+
+	/** TestA: place a CRT, insert a burned pak, play (TestB watches), leave, punch it to get it back. {@code reopen}: after a server restart. */
+	private void crtPlayer(boolean reopen) {
+		BlockPos at = main(() -> mc.player.blockPosition());
+		double gy = at.getY();
+		double tx, tz;
+		command("time set noon");
+		command("weather clear");
+		command("difficulty peaceful");
+		try {
+			if (!reopen) {
+				giveAndWait(GbaItems.CRT);
+				giveAndWait(GbaItems.BLANK_PAK);
+				burn();
+				command("kill @e[type=!minecraft:player]");
+				tx = at.getX() + 6.0; tz = at.getZ() + 0.5;
+				Files.createDirectories(sync);
+				Files.writeString(crtPosFile(), tx + " " + gy + " " + tz);
+				tp(tx + 0.5, gy, tz - 3.2, 0f, 8f);
+				select(slotOf(GbaItems.CRT));
+				BlockPos floor = new BlockPos(at.getX() + 6, at.getY() - 1, at.getZ());
+				main(() -> mc.gameMode.useItemOn(mc.player, InteractionHand.MAIN_HAND,
+					new net.minecraft.world.phys.BlockHitResult(new net.minecraft.world.phys.Vec3(floor.getX() + 0.5, gy, floor.getZ() + 0.5), Direction.UP, floor, false)));
+				sleep(1500);
+				waitFor("CRT entity", 5000, () -> findCrtEntityNow() != null);
+				check(true, "CRT placed");
+				clearClutter();
+				shot("crt_idle_placed");
+				// insert the pak: pak -> off hand, sneak-use the TV
+				select(slotOf(GbaItems.PAK));
+				main(() -> mc.player.connection.send(new ServerboundPlayerActionPacket(
+					ServerboundPlayerActionPacket.Action.SWAP_ITEM_WITH_OFFHAND, BlockPos.ZERO, Direction.DOWN, 0)));
+				waitFor("pak in off hand", 5000, () -> GbaItems.is(mc.player.getItemInHand(InteractionHand.OFF_HAND), GbaItems.PAK));
+				interactCrt(true);
+				waitFor("pak inserted (off hand empty)", 5000, () -> mc.player.getItemInHand(InteractionHand.OFF_HAND).isEmpty());
+				check(true, "pak inserted into the CRT");
+			} else {
+				String[] pos = Files.readString(crtPosFile()).trim().split(" ");
+				tx = Double.parseDouble(pos[0]); tz = Double.parseDouble(pos[2]);
+				tp(tx, gy, tz - 3.2, 0f, 8f);
+				waitFor("CRT entity after restart", 15000, () -> findCrtEntityNow() != null);
+				check(true, "CRT entity still there after the server restart");
+			}
+		} catch (IOException e) {
+			throw new Fail("crt pos file " + e);
+		}
+		signal("A.ready");
+		if (System.getProperty("gbalink.crt.nob") == null) awaitSignal("B.ready", 240000);
+		if (System.getProperty("gbalink.crt.third") != null) awaitSignal("C.ready", 240000);
+		// play
+		tp(tx, gy, tz - 3.6, 0f, 8f);
+		interactCrt(false);
+		waitFor("CRT screen with a live session", 20000, () -> mc.gui.screen() instanceof CrtScreen && GbaLinkClient.currentSession() != null);
+		waitFor("first frame", 10000, () -> GbaLinkClient.currentSession().frames.seq() > 5);
+		check(true, "CRT play mode open and emulating");
+		sleep(1500);
+		float[] rot = main(() -> new float[] {mc.player.getYRot(), mc.player.getXRot()});
+		log("camera after turning to the TV: yaw=" + rot[0] + " pitch=" + rot[1]);
+		hideGui(false);
+		clearClutter();
+		shot("crt_A_playing");
+		CrtScreen cs = main(() -> mc.gui.screen() instanceof CrtScreen c ? c : null);
+		main(() -> cs.keyPressed(new KeyEvent(InputConstants.KEY_RIGHT, 262, 0)));
+		sleep(500);
+		main(() -> cs.keyReleased(new KeyEvent(InputConstants.KEY_RIGHT, 262, 0)));
+		check((main(() -> GbaLinkClient.currentSession().heldMask()) & (1 << 4)) == 0, "key released");
+		signal("A.playing");
+		sleep(12000); // viewers watch
+		long up = main(() -> GbaLinkClient.currentSession().streamer().bytesSent.get());
+		log("streamer uploaded " + up + " bytes in total, video packets " + main(() -> GbaLinkClient.currentSession().streamer().videoPackets.get()));
+		shot("crt_A_playing2");
+		signal("A.done");
+		sleep(1500);
+		// leave with Esc: suspends like closing the GBA
+		EmulatorSession ses = GbaLinkClient.currentSession();
+		main(() -> cs.keyPressed(new KeyEvent(InputConstants.KEY_ESCAPE, 256, 0)));
+		waitFor("screen closed", 5000, () -> mc.gui.screen() == null);
+		waitFor("session finished", 8000, ses::isFinished);
+		sleep(1500);
+		shot("crt_A_after_leaving");
+		if (reopen) { log("reopen scenario done (persistence verified); leaving the TV in place"); return; }
+		if (System.getProperty("gbalink.crt.keep") != null) { log("keeping the TV in the world (persistence test)"); return; }
+		// punch it: the CRT item comes back with the pak
+		tp(tx, gy, tz - 2.2, 0f, 8f);
+		net.minecraft.world.entity.Interaction e = findCrtEntity();
+		main(() -> mc.gameMode.attack(mc.player, e));
+		sleep(1500);
+		waitFor("CRT entity gone", 5000, () -> findCrtEntityNow() == null);
+		check(true, "punching removed the TV (both parts)");
+		tp(tx + 0.5, gy, tz, 0f, 30f); // walk onto the dropped item
+		waitFor("dropped CRT item (with the pak) picked up", 10000, () -> {
+			for (int i = 0; i < 36; i++) {
+				ItemStack st = mc.player.getInventory().getItem(i);
+				if (GbaItems.is(st, GbaItems.CRT) && GbaItems.insertedPak(st) != null) return true;
+			}
+			return false;
+		});
+		PakData back = main(() -> {
+			for (int i = 0; i < 36; i++) {
+				ItemStack st = mc.player.getInventory().getItem(i);
+				if (GbaItems.is(st, GbaItems.CRT) && GbaItems.insertedPak(st) != null) return GbaItems.insertedPak(st);
+			}
+			return null;
+		});
+		check(back != null, "the dropped CRT item still holds the pak (" + (back == null ? "?" : back.title()) + ")");
+	}
+
+	private net.minecraft.world.entity.Interaction findCrtEntityNow() {
+		net.minecraft.world.entity.Interaction best = null;
+		for (net.minecraft.world.entity.Entity e : mc.level.entitiesForRendering()) {
+			if (e instanceof net.minecraft.world.entity.Interaction i) best = i;
+		}
+		return best;
+	}
+
+	/** TestB/C: stand about 5 blocks from the TV and watch. */
+	private void crtViewer() {
+		awaitSignal("A.ready", 240000);
+		double tx, gy, tz;
+		try {
+			String[] pos = Files.readString(crtPosFile()).trim().split(" ");
+			tx = Double.parseDouble(pos[0]); gy = Double.parseDouble(pos[1]); tz = Double.parseDouble(pos[2]);
+		} catch (IOException e) {
+			throw new Fail("crt pos " + e);
+		}
+		boolean second = mode.equals("crtC");
+		tp(tx + (second ? -3.5 : 3.5), gy, tz - 5.0, second ? -32f : 32f, 4f);
+		hideGui(false);
+		signal(mode.substring(3) + ".ready");
+		awaitSignal("A.playing", 120000);
+		waitFor("viewer state", 20000, () -> CrtClient.anyWatched() != null);
+		UUID id = main(CrtClient::anyWatched);
+		int state = main(() -> CrtClient.viewState(id));
+		log("viewer state for the TV = " + state + " (1 watching, 2 limit reached)");
+		if (state == 2) {
+			sleep(1500);
+			clearClutter();
+			shot("crt_" + mode + "_limit_reached");
+			awaitSignal("A.done", 120000);
+			return;
+		}
+		waitFor("first decoded frame", 20000, () -> CrtClient.hasFrame(id));
+		check(true, "viewer decoded the first frame");
+		sleep(2500);
+		clearClutter();
+		shot("crt_" + mode + "_watching");
+		sleep(8000);
+		double[] st = main(() -> CrtClient.viewerStats(id));
+		log("viewer stats: " + (st == null ? "none" : String.format("%.1f fps, %.1f KB/s", st[0], st[1])));
+		shot("crt_" + mode + "_watching2");
+		awaitSignal("A.done", 120000);
+		sleep(2000);
+		int after = main(() -> CrtClient.viewState(id));
+		log("viewer state after the stream ended = " + after + " (-1 = TV forgotten / idle)");
+		shot("crt_" + mode + "_after_stream");
 	}
 
 	private void solo() {

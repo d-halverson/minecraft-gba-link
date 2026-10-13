@@ -22,8 +22,8 @@ public final class GbaScreen extends Screen {
 	private static final Identifier TEX = Identifier.fromNamespaceAndPath("gbalink", "dynamic/screen");
 	private static final int W = GbaNative.WIDTH, H = GbaNative.HEIGHT;
 
-	// GBA KEYINPUT bit order
-	private static final int A = 0, B = 1, SELECT = 2, START = 3, RIGHT = 4, LEFT = 5, UP = 6, DOWN = 7, R = 8, L = 9;
+	private static final int A = GbaKeys.A, B = GbaKeys.B, SELECT = GbaKeys.SELECT, START = GbaKeys.START, RIGHT = GbaKeys.RIGHT,
+		LEFT = GbaKeys.LEFT, UP = GbaKeys.UP, DOWN = GbaKeys.DOWN, R = GbaKeys.R, L = GbaKeys.L;
 
 	private final EmulatorSession session; // null in message mode
 	private final List<String> message;
@@ -46,22 +46,6 @@ public final class GbaScreen extends Screen {
 		super(Component.literal("Game Boy Advance"));
 		this.session = null;
 		this.message = message;
-	}
-
-	private static int bitFor(int scancode) {
-		return switch (scancode) {
-			case InputConstants.KEY_RIGHT -> RIGHT;
-			case InputConstants.KEY_LEFT -> LEFT;
-			case InputConstants.KEY_UP -> UP;
-			case InputConstants.KEY_DOWN -> DOWN;
-			case InputConstants.KEY_X -> A;
-			case InputConstants.KEY_Z -> B;
-			case InputConstants.KEY_A -> L;
-			case InputConstants.KEY_S -> R;
-			case InputConstants.KEY_RETURN, 88 /* keypad enter */ -> START;
-			case InputConstants.KEY_BACKSPACE -> SELECT;
-			default -> -1;
-		};
 	}
 
 	@Override
@@ -115,27 +99,14 @@ public final class GbaScreen extends Screen {
 	@Override
 	public boolean keyPressed(KeyEvent event) {
 		if (session == null) return super.keyPressed(event);
-		int sc = event.key();
-		int bit = bitFor(sc);
-		if (bit >= 0) {
-			session.press(bit);
-			return true;
-		}
-		if (sc == InputConstants.KEY_F5) { session.saveStateAsync(); return true; }
-		if (sc == InputConstants.KEY_F8) { session.loadStateAsync(); return true; }
-		if (sc == InputConstants.KEY_P) { powerOff(); return true; }
-		// Space (and Tab) = fast-forward while held. Consumed here so a focused button never activates on Space.
-		if (sc == InputConstants.KEY_SPACE || sc == InputConstants.KEY_TAB) { session.turbo = true; return true; }
+		if (GbaKeys.press(session, event.key(), this::powerOff)) return true;
 		return super.keyPressed(event);
 	}
 
 	@Override
 	public boolean keyReleased(KeyEvent event) {
 		if (session == null) return super.keyReleased(event);
-		int sc = event.key();
-		int bit = bitFor(sc);
-		if (bit >= 0) { session.release(bit); return true; }
-		if (sc == InputConstants.KEY_SPACE || sc == InputConstants.KEY_TAB) { session.turbo = false; return true; }
+		if (GbaKeys.release(session, event.key())) return true;
 		return super.keyReleased(event);
 	}
 

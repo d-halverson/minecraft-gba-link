@@ -63,8 +63,11 @@ public final class GbaServer {
 	private final Map<UUID, Integer> cableCooldown = new HashMap<>();
 	private int tickCounter;
 
+	final CrtServer crt;
+
 	private GbaServer(MinecraftServer server) {
 		this.server = server;
+		this.crt = new CrtServer(this, server);
 	}
 
 	private static GbaServer instance;
@@ -84,6 +87,22 @@ public final class GbaServer {
 		ServerPlayNetworking.registerGlobalReceiver(Payloads.SaveChunk.TYPE, (p, ctx) -> with(ctx.server(), s -> s.onSaveChunk(ctx.player(), p)));
 		ServerPlayNetworking.registerGlobalReceiver(Payloads.Close.TYPE, (p, ctx) -> with(ctx.server(), s -> s.onClose(ctx.player(), p)));
 		ServerPlayNetworking.registerGlobalReceiver(Payloads.LinkDataC2S.TYPE, (p, ctx) -> fastRelay(ctx.player().connection, p));
+		ServerPlayNetworking.registerGlobalReceiver(Payloads.CrtStreamC2S.TYPE, (p, ctx) -> CrtServer.fastStream(ctx.player().connection, p));
+		ServerPlayNetworking.registerGlobalReceiver(Payloads.CrtClose.TYPE, (p, ctx) -> with(ctx.server(), s -> s.crt.onCrtClose(ctx.player(), p.crtId())));
+		ServerPlayNetworking.registerGlobalReceiver(Payloads.CrtNeedKeyframe.TYPE, (p, ctx) -> with(ctx.server(), s -> s.crt.onNeedKeyframe(ctx.player(), p.crtId())));
+		net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents.SERVER_STARTING.register(srv -> {
+			CrtServer.config = com.drew.gba.crt.CrtConfig.load(net.fabricmc.loader.api.FabricLoader.getInstance().getConfigDir().resolve("gbalink.properties"));
+			LOG.info("CRT settings: crt_max_viewers={}, crt_view_distance={}", CrtServer.config.maxViewers(), CrtServer.config.viewDistance());
+		});
+		net.fabricmc.fabric.api.event.player.UseBlockCallback.EVENT.register((player, level, hand, hit) -> {
+			if (level.isClientSide() || !(player instanceof ServerPlayer sp) || hand != InteractionHand.MAIN_HAND) return InteractionResult.PASS;
+			if (!GbaItems.is(sp.getItemInHand(hand), GbaItems.CRT)) return InteractionResult.PASS;
+			return with(sp.level().getServer()).crt.place(sp, hit);
+		});
+		net.fabricmc.fabric.api.event.player.AttackEntityCallback.EVENT.register((player, level, hand, entity, hit) -> {
+			if (level.isClientSide() || !(player instanceof ServerPlayer sp) || !(entity instanceof net.minecraft.world.entity.Interaction i)) return InteractionResult.PASS;
+			return with(sp.level().getServer()).crt.onPunch(sp, i) ? InteractionResult.SUCCESS : InteractionResult.PASS;
+		});
 
 		UseItemCallback.EVENT.register((player, level, hand) -> {
 			if (level.isClientSide() || !(player instanceof ServerPlayer sp)) return InteractionResult.PASS;
@@ -93,6 +112,9 @@ public final class GbaServer {
 			// allays would duplicate on an amethyst shard (eating the GBA) or take the item
 			if (entity instanceof net.minecraft.world.entity.animal.allay.Allay && GbaItems.isOurs(player.getItemInHand(hand))) {
 				return InteractionResult.FAIL;
+			}
+			if (!level.isClientSide() && player instanceof ServerPlayer csp && entity instanceof net.minecraft.world.entity.Interaction i && CrtServer.isCrt(i)) {
+				return with(csp.level().getServer()).crt.onUse(csp, hand, i);
 			}
 			if (level.isClientSide() || !(player instanceof ServerPlayer sp) || !(entity instanceof ServerPlayer target)) {
 				return InteractionResult.PASS;
@@ -123,7 +145,7 @@ public final class GbaServer {
 
 	// ------------------------------------------------------------------ items
 
-	private static void hint(ServerPlayer p, String msg) {
+	static void hint(ServerPlayer p, String msg) {
 		p.sendOverlayMessage(Component.literal(msg));
 	}
 
@@ -141,6 +163,7 @@ public final class GbaServer {
 				if (!ServerPlayNetworking.canSend(p, Payloads.Open.TYPE)) hint(p, "Install the GBA Link client mod to burn games");
 			}
 			case GbaItems.CABLE -> hint(p, "Right-click another player to link up");
+			case GbaItems.CRT -> hint(p, "Right-click a block to place the TV");
 			default -> { }
 		}
 		return GbaItems.isType(type) ? InteractionResult.SUCCESS : InteractionResult.PASS;
@@ -186,6 +209,7 @@ public final class GbaServer {
 	}
 
 	private void closeSessionFor(ServerPlayer p) {
+		crt.endForPlayer(p.getUUID());
 		sessions.remove(p.getUUID());
 		assemblers.remove(p.getUUID());
 		refreshLink(p.getUUID());
@@ -218,7 +242,21 @@ public final class GbaServer {
 		return server.getWorldPath(LevelResource.ROOT).resolve("gbalink").resolve("saves");
 	}
 
-	private SaveStore store() {
+	static Integer protocolOf(UUID id) {
+		return clientProtocol.get(id);
+	}
+
+	/** Marks {@code pakId} as the pak this player has open (so its save uploads are accepted). */
+	void openSession(ServerPlayer p, UUID pakId) {
+		sessions.put(p.getUUID(), pakId);
+		assemblers.remove(p.getUUID());
+	}
+
+	void refreshLinkOf(UUID id) {
+		refreshLink(id);
+	}
+
+	SaveStore store() {
 		if (store == null) store = new SaveStore(savesDir());
 		return store;
 	}
@@ -453,6 +491,7 @@ public final class GbaServer {
 
 	private void onDisconnect(ServerPlayer p) {
 		UUID id = p.getUUID();
+		crt.onDisconnect(id);
 		sessions.remove(id); // unlink() below republishes the room (and routes) without this player
 		assemblers.remove(id);
 		lastSent.remove(id);
@@ -469,6 +508,7 @@ public final class GbaServer {
 
 	private void tick() {
 		tickCounter++;
+		crt.tick();
 		if (tickCounter % 20 != 0) return;
 		for (List<UUID> room : rooms.allRooms()) {
 			for (UUID id : room) {
@@ -525,7 +565,7 @@ public final class GbaServer {
 				.requires(Commands.hasPermission(Commands.LEVEL_GAMEMASTERS))
 				.then(Commands.argument("item", StringArgumentType.word())
 					.suggests((c, b) -> SharedSuggestionProvider.suggest(
-						new String[] {GbaItems.GBA, GbaItems.BLANK_PAK, GbaItems.CABLE}, b))
+						new String[] {GbaItems.GBA, GbaItems.BLANK_PAK, GbaItems.CABLE, GbaItems.CRT}, b))
 					.executes(ctx -> give(ctx.getSource(), StringArgumentType.getString(ctx, "item"), ctx.getSource().getPlayerOrException()))
 					.then(Commands.argument("player", EntityArgument.player())
 						.executes(ctx -> give(ctx.getSource(), StringArgumentType.getString(ctx, "item"),
@@ -533,8 +573,8 @@ public final class GbaServer {
 	}
 
 	private static int give(CommandSourceStack src, String type, ServerPlayer target) {
-		if (!(type.equals(GbaItems.GBA) || type.equals(GbaItems.BLANK_PAK) || type.equals(GbaItems.CABLE))) {
-			src.sendFailure(Component.literal("Unknown item '" + type + "' (gba, blank_pak, cable)"));
+		if (!(type.equals(GbaItems.GBA) || type.equals(GbaItems.BLANK_PAK) || type.equals(GbaItems.CABLE) || type.equals(GbaItems.CRT))) {
+			src.sendFailure(Component.literal("Unknown item '" + type + "' (gba, blank_pak, cable, crt)"));
 			return 0;
 		}
 		ItemStack stack = GbaItems.create(type);

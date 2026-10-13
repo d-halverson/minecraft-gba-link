@@ -1,0 +1,16 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "pattern": ["III", "CTC", "ARA"],
+  "key": {"I": "minecraft:iron_ingot", "C": "minecraft:copper_ingot", "T": "minecraft:tinted_glass", "A": "minecraft:amethyst_shard", "R": "minecraft:redstone"},
+  "result": {
+    "id": "minecraft:echo_shard",
+    "count": 1,
+    "components": {
+      "minecraft:custom_data": {"gbalink": {"type": "crt"}},
+      "minecraft:item_model": "gbalink:crt",
+      "minecraft:item_name": "CRT TV",
+      "minecraft:max_stack_size": 1
+    }
+  }
+}

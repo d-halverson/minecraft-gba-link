@@ -47,6 +47,7 @@ public final class EmulatorSession implements Runnable {
 
 	private final Thread thread;
 	private final AudioOut audio;
+	private volatile com.drew.gba.client.crt.CrtStreamer streamer;
 	private volatile boolean stop;
 	private volatile boolean finished;
 	private volatile String error;
@@ -87,6 +88,14 @@ public final class EmulatorSession implements Runnable {
 		this.thread = new Thread(this, "gbalink-emulator");
 		this.thread.setDaemon(true);
 	}
+
+	/** CRT mode: encode and upload the picture and sound for spectators while this session runs. */
+	public void attachStreamer(com.drew.gba.client.crt.CrtStreamer s) {
+		this.streamer = s;
+		s.start();
+	}
+
+	public com.drew.gba.client.crt.CrtStreamer streamer() { return streamer; }
 
 	public void start() {
 		thread.start();
@@ -254,6 +263,7 @@ public final class EmulatorSession implements Runnable {
 			if (!suppressNet) sendQuiet(new Payloads.Close(pakId));
 			if (core != null) core.close();
 			audio.close();
+			if (streamer != null) streamer.close();
 			finished = true;
 		}
 	}
@@ -268,9 +278,14 @@ public final class EmulatorSession implements Runnable {
 			link.deliverIncoming();
 			if (!runOneFrame()) break;
 			frames.publish(core::copyFramebuffer);
+			com.drew.gba.client.crt.CrtStreamer st = streamer;
+			if (st != null) st.offerFrame(frames);
 			int got;
 			while ((got = core.readAudio(pcm, 2048)) > 0) {
-				if (!turbo) audio.write(pcm, got);
+				if (!turbo) {
+					audio.write(pcm, got);
+					if (st != null) st.offerAudio(pcm, got);
+				}
 				if (got < 2048) break;
 			}
 			long now = System.nanoTime();

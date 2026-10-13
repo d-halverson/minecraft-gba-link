@@ -50,7 +50,13 @@ public final class SelfTest {
 			boolean spyCable = craftable(srv, List.of(new ItemStack(Items.AMETHYST_SHARD), GbaItems.create(GbaItems.CABLE), new ItemStack(Items.COPPER_INGOT)), 1, 3);
 			// anvil repair guard
 			boolean repair = new ItemStack(Items.COPPER_INGOT).isValidRepairItem(GbaItems.create(GbaItems.CABLE));
-			boolean ok = baseline && !pak && !blank && spyBase && !spyGba && !spyCable && !repair;
+			// the CRT TV recipe: iron x3 / copper+tinted glass+copper / amethyst+redstone+amethyst must still craft
+			ItemStack I = new ItemStack(Items.IRON_INGOT), C = new ItemStack(Items.COPPER_INGOT), T = new ItemStack(Items.TINTED_GLASS),
+				A = new ItemStack(Items.AMETHYST_SHARD), R = new ItemStack(Items.REDSTONE);
+			boolean crtRecipe = craftable(srv, List.of(I, I.copy(), I.copy(), C, T, C.copy(), A, R, A.copy()), 3, 3);
+			boolean crtInput = craftable(srv, List.of(I, I.copy(), I.copy(), C, GbaItems.create(GbaItems.CRT), C.copy(), A, R, A.copy()), 3, 3);
+			boolean ok = crtRecipe && !crtInput && baseline && !pak && !blank && spyBase && !spyGba && !spyCable && !repair;
+			LOG.info("[SELFTEST] crtRecipeCraftable={} crtItemAsIngredientBlocked={}", crtRecipe, !crtInput);
 			LOG.info("[SELFTEST] crafting guard: ironIngotFromNuggets={} withPak={} withBlankPak={} spyglassBaseline={} spyglassWithGba={} spyglassWithCable={} cableAsRepairMaterial={} => {}",
 				baseline, pak, blank, spyBase, spyGba, spyCable, repair, ok ? "PASS" : "FAIL");
 		} catch (Throwable t) {
