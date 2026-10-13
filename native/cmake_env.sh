@@ -1,7 +1,7 @@
 # Sourced by the build scripts. Sets CMAKE, CTEST, JOBS, DIST (all safe with spaces in paths).
 #   CMAKE=/path/to/cmake   explicit override
 #   otherwise: `cmake` from PATH, otherwise the bundled copy in ../tools/cmake (local dev only)
-HERE="$(cd "$(dirname "$0")" && pwd)"
+HERE="$(pwd)"   # every caller cd's into native/ before sourcing this
 if [ -z "${CMAKE:-}" ]; then
   if command -v cmake >/dev/null 2>&1; then
     CMAKE="$(command -v cmake)"
