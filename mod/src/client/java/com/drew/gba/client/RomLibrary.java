@@ -67,6 +67,8 @@ public final class RomLibrary {
 		try {
 			Files.createDirectories(romsDir());
 			Files.createDirectories(importsDir());
+			// the rest of gbalink/ is created up front too, so every folder the docs mention exists after the first launch
+			for (Path d : new Path[] {exportsDir(), savesDir(), statesDir(), suspendDir(), baseDir().resolve("natives")}) Files.createDirectories(d);
 			Path readme = romsDir().resolve("README.txt");
 			if (!Files.exists(readme)) Files.writeString(readme, ROMS_README, StandardCharsets.UTF_8);
 		} catch (IOException | RuntimeException e) {

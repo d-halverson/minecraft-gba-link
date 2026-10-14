@@ -1,5 +1,7 @@
 package com.drew.gba.client.emu;
 
+import com.drew.gba.client.netplay.NetplayController;
+import com.drew.gba.client.netplay.NetplayEngine;
 import com.drew.gba.net.Payloads;
 import com.drew.gba.save.SaveRules;
 import com.drew.gba.save.SuspendFile;
@@ -70,6 +72,12 @@ public final class EmulatorSession implements Runnable {
 
 	private final ConcurrentLinkedQueue<Runnable> commands = new ConcurrentLinkedQueue<>();
 	private final LinkPump link;
+	/** Input-sync netplay (same ROM in every linked pak). Created with the session, driven by the emulator thread. */
+	private final NetplayController netplay;
+	/** The server's last link_state, so the classic cable can be restored when netplay ends. */
+	private volatile int lastLinkMode;
+	private volatile boolean netplayExpected, netplayActive;
+	private long lastSaveNanos;
 	private volatile String toast = "";
 	private volatile long toastUntil;
 
@@ -84,6 +92,7 @@ public final class EmulatorSession implements Runnable {
 		this.currentRev = c.serverRevision();
 		this.link = new LinkPump(m -> sendQuiet(new Payloads.LinkDataC2S(m)), System::nanoTime, LINK_TIMEOUT_NANOS,
 			() -> toast("Link partner not responding - cable unplugged"), c.linkIndex(), c.linkCount(), c.linkNames());
+		this.netplay = new NetplayController(natives, c.romPath(), null, new NetTransport(), System::nanoTime, new NetEvents());
 		this.audio = new AudioOut();
 		this.thread = new Thread(this, "gbalink-emulator");
 		this.thread.setDaemon(true);
@@ -113,9 +122,21 @@ public final class EmulatorSession implements Runnable {
 	public String error() { return error; }
 	public boolean audioAvailable() { return audio.available(); }
 
-	public void saveStateAsync() { commands.add(this::doSaveState); }
-	public void loadStateAsync() { commands.add(this::doLoadState); }
+	public void saveStateAsync() { if (netplayBlocked("Save state")) return; commands.add(this::doSaveState); }
+	public void loadStateAsync() { if (netplayBlocked("Load state")) return; commands.add(this::doLoadState); }
 	public void exportSaveAsync() { commands.add(this::doExport); }
+	/** Replace this cartridge's save with {@code data} (read from {@code fileName}) and cold-boot from it. */
+	public void importSaveAsync(String fileName, byte[] data) {
+		if (netplayBlocked("Import")) return;
+		commands.add(() -> doImport(fileName, data));
+	}
+
+	/** True (with a toast) if netplay is running: some actions would desynchronise the linked consoles. */
+	private boolean netplayBlocked(String what) {
+		if (!netplayActive && !netplayExpected) return false;
+		toast(what + " is off while linked in netplay - unlink or close the other GBA first", 4000);
+		return true;
+	}
 
 	/** Real power off: the save is flushed, the suspend state is deleted, the next open cold-boots. */
 	public void powerOff() { powerOff = true; stop = true; }
@@ -174,8 +195,56 @@ public final class EmulatorSession implements Runnable {
 	public boolean linkTimedOut() { return link.timedOut(); }
 
 	public void onLinkState(int index, int count, List<String> names) {
-		commands.add(() -> link.apply(index, count, names));
+		onLinkState(index, count, names, Payloads.LinkState.MODE_CLASSIC);
 	}
+
+	/** link_state from the server. mode NETPLAY: the cable is handled by NetplayController once netplay_start arrives. */
+	public void onLinkState(int index, int count, List<String> names, int mode) {
+		lastLinkMode = mode;
+		netplayExpected = mode == Payloads.LinkState.MODE_NETPLAY && count >= 2;
+		commands.add(() -> {
+			if (mode == Payloads.LinkState.MODE_NETPLAY && count >= 2) {
+				link.apply(0, 0, List.of()); // the classic cable stays unplugged; netplay_start follows
+				return;
+			}
+			leaveNetplay();
+			link.apply(index, count, names);
+		});
+	}
+
+	/** netplay_start from the server: a (new) netplay session for this client. */
+	public void onNetplayStart(NetplayEngine.Params p) {
+		commands.add(() -> {
+			if (core == null) return;
+			link.apply(0, 0, List.of());
+			netplay.start(p);
+			netplayActive = netplay.active();
+			syncNetplayCore();
+		});
+	}
+
+	public NetplayController netplay() { return netplay; }
+
+	/** Emulator thread: take over the console the netplay controller owns (the local sim core, or the original one again). */
+	private void syncNetplayCore() {
+		GbaCore c = netplay.core();
+		if (c != null && c != core) {
+			core = c;
+			link.bind(core);
+		}
+		netplayActive = netplay.active();
+	}
+
+	private void leaveNetplay() {
+		if (!netplay.active()) return;
+		netplay.end();
+		syncNetplayCore();
+		netplayExpected = false;
+		linkStats().clear(System.nanoTime());
+		toast("Link ended", 2500);
+	}
+
+	private LinkStats linkStats() { return link.stats(); }
 
 	public void onLinkData(int from, byte[] bytes) {
 		link.offer(from, bytes);
@@ -185,12 +254,45 @@ public final class EmulatorSession implements Runnable {
 		return System.currentTimeMillis() < toastUntil ? toast : "";
 	}
 
+	/** One-line link performance readout ("" when not cabled or nothing measured yet). */
+	public String linkStatsLine() {
+		if (netplayActive) return netplay.statsLine();
+		if (link.count() < 2 || link.timedOut()) return "";
+		return link.stats().latest().format();
+	}
+
+	private static final long LINK_LOG_PERIOD_NANOS = 5_000_000_000L;
+	private LinkLog linkLog;
+
+	/** Emulator thread, once per frame: roll the stats windows and append the 5 s line to gbalink/link.log while cabled. */
+	private void statsTick() {
+		long now = System.nanoTime();
+		LinkStats st = link.stats();
+		st.tick(now);
+		if (link.count() < 2) {
+			st.rollLog(now, LINK_LOG_PERIOD_NANOS); // keep the window fresh so the first line after plugging is a full window
+			return;
+		}
+		LinkStats.Snapshot s = st.rollLog(now, LINK_LOG_PERIOD_NANOS);
+		if (s == null) return;
+		try {
+			if (linkLog == null) linkLog = new LinkLog(cfg.exportDir().getParent().resolve("link.log"), LinkLog.DEFAULT_MAX_BYTES);
+			linkLog.append(LinkLog.line(System.currentTimeMillis(), title, link.index() == 0 ? "master" : "child", link.count(),
+				s.format().replaceFirst("^Link: ", "")));
+		} catch (RuntimeException e) {
+			// diagnostics must never disturb emulation
+		}
+	}
+
 	public String linkStatus() {
+		if (netplayActive) return netplay.statusLine();
+		if (netplayExpected) return "Connecting link...";
 		int c = link.count(), i = link.index();
 		if (link.timedOut()) return "Link: partner not responding - cable unplugged";
 		if (c < 2) return "Link: not connected";
 		String names = String.join(", ", link.names());
-		return (link.waiting() ? "Link: waiting for partner... " : "Link: ") + "P" + (i + 1) + " of " + c + " - " + names;
+		String head = lastLinkMode == Payloads.LinkState.MODE_NETPLAY ? "Link" : "Link (different games \u2014 slow mode)";
+		return (link.waiting() ? head + ": waiting for partner... " : head + ": ") + "P" + (i + 1) + " of " + c + " - " + names;
 	}
 
 	/** Ask the thread to finish (flushes the save, tells the server) and wait briefly for it. */
@@ -248,6 +350,7 @@ public final class EmulatorSession implements Runnable {
 			} else if (cfg.startToast() != null && !cfg.startToast().isEmpty()) {
 				toast(cfg.startToast(), 6000);
 			}
+			netplay.setCore(core);
 			link.bind(core);
 			link.apply(link.index(), link.count(), link.names());
 			loop();
@@ -256,6 +359,8 @@ public final class EmulatorSession implements Runnable {
 			error = "Emulator error: " + t;
 		} finally {
 			try {
+				if (netplay.active()) { netplay.end(); syncNetplayCore(); } // the local console keeps its state and suspends normally
+				netplay.shutdown();
 				if (core != null) endSession();
 			} catch (Throwable t) {
 				LOG.warn("Final save failed", t);
@@ -272,11 +377,24 @@ public final class EmulatorSession implements Runnable {
 		short[] pcm = new short[2048 * 2];
 		long next = System.nanoTime();
 		long lastSave = next;
+		lastSaveNanos = next;
+		boolean wasNetplay = false;
 		while (!stop) {
 			drainCommands();
+			if (netplay.active()) {
+				wasNetplay = true;
+				if (!runNetplay(pcm)) break;
+				continue;
+			}
+			if (wasNetplay) { // the standalone clock restarts after netplay
+				wasNetplay = false;
+				next = System.nanoTime();
+				lastSave = lastSaveNanos;
+			}
 			core.setKeys(held | latched.getAndSet(0));
 			link.deliverIncoming();
 			if (!runOneFrame()) break;
+			statsTick();
 			frames.publish(core::copyFramebuffer);
 			com.drew.gba.client.crt.CrtStreamer st = streamer;
 			if (st != null) st.offerFrame(frames);
@@ -290,7 +408,7 @@ public final class EmulatorSession implements Runnable {
 			}
 			long now = System.nanoTime();
 			if (now - lastSave > SAVE_INTERVAL_NANOS) {
-				lastSave = now;
+				lastSave = lastSaveNanos = now;
 				flushSave(false);
 			}
 			if (turbo) { next = now; continue; }
@@ -319,6 +437,82 @@ public final class EmulatorSession implements Runnable {
 			long lag = System.nanoTime() - next;
 			if (lag > 100_000_000L) next = System.nanoTime();
 		}
+	}
+
+	private short[] npPcm = new short[2048 * 2];
+	private long lastNpLog;
+
+	/** One iteration while netplay is starting or running. Returns false on a fatal error. */
+	private boolean runNetplay(short[] pcm) {
+		if (turbo) { turbo = false; toast("Fast-forward is off while linked in netplay", 3000); }
+		boolean ok = netplay.iterate(() -> (held | latched.getAndSet(0)) & 0x3FF, this::netplayFrame, () -> stop);
+		syncNetplayCore();
+		long now = System.nanoTime();
+		if (netplayActive && netplay.running()) {
+			if (now - lastSaveNanos > SAVE_INTERVAL_NANOS) {
+				lastSaveNanos = now;
+				flushSave(false); // only this client's own console is saved and uploaded
+			}
+			if (now - lastNpLog > LINK_LOG_PERIOD_NANOS) {
+				lastNpLog = now;
+				logLine("netplay | " + netplay.statsLine().replaceFirst("^Netplay: ", ""));
+			}
+		}
+		if (!ok) return true;
+		return error == null;
+	}
+
+	/** A netplay frame of the local console is ready: picture, sound (only this console's), CRT stream. */
+	private void netplayFrame(GbaCore local) {
+		frames.publish(local::copyFramebuffer);
+		com.drew.gba.client.crt.CrtStreamer st = streamer;
+		if (st != null) st.offerFrame(frames);
+		int got;
+		while ((got = local.readAudio(npPcm, 2048)) > 0) {
+			audio.write(npPcm, got);
+			if (st != null) st.offerAudio(npPcm, got);
+			if (got < 2048) break;
+		}
+	}
+
+	private void logLine(String text) {
+		try {
+			if (linkLog == null) linkLog = new LinkLog(cfg.exportDir().getParent().resolve("link.log"), LinkLog.DEFAULT_MAX_BYTES);
+			linkLog.append(LinkLog.line(System.currentTimeMillis(), title, "P" + (netplay.engine() == null ? 0 : netplay.engine().params().index() + 1),
+				netplay.engine() == null ? 0 : netplay.engine().params().count(), text));
+		} catch (RuntimeException e) {
+			// diagnostics must never disturb emulation
+		}
+	}
+
+	/** Sends netplay messages to the server (called on the emulator thread). */
+	private final class NetTransport implements NetplayEngine.Transport {
+		@Override public void input(long session, int first, short[] recs, int sendMs, int[] echo) {
+			sendQuiet(new Payloads.NetplayInputC2S(session, first, recs, sendMs, echo));
+		}
+
+		@Override public void hash(long session, int gen, int frame, int hash) {
+			sendQuiet(new Payloads.NetplayHashC2S(session, gen, frame, hash));
+		}
+
+		@Override public void snapshot(long session, int gen, int frame, byte[] blob) {
+			int off = 0;
+			do {
+				int len = Math.min(CHUNK, blob.length - off);
+				sendQuiet(new Payloads.NetplaySnapshotC2S(session, gen, frame, off, blob.length, Arrays.copyOfRange(blob, off, off + len)));
+				off += len;
+			} while (off < blob.length);
+		}
+
+		@Override public void restart(long session) { sendQuiet(new Payloads.NetplayRestartC2S(session)); }
+	}
+
+	private final class NetEvents implements NetplayController.Events {
+		@Override public void toast(String message) { EmulatorSession.this.toast(message, 4000); }
+		@Override public void log(String message) { LOG.info("[netplay] {}", message); logLine(message); }
+		@Override public void left(String reason) { netplayExpected = false; }
+		@Override public void desync(int frame) { EmulatorSession.this.toast("Link desync - resyncing", 3000); }
+		@Override public void resynced(int frame) { EmulatorSession.this.toast("Link resynced", 2500); }
 	}
 
 	/** Runs the core to the end of one frame, servicing the link cable. Returns false on a fatal error. */
@@ -429,15 +623,75 @@ public final class EmulatorSession implements Runnable {
 	private void doExport() {
 		byte[] save = readSave();
 		if (save == null || save.length == 0) { toast("This game has no save yet"); return; }
-		String stamp = java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss"));
-		Path out = cfg.exportDir().resolve(SaveRules.safeFileName(title) + "-" + stamp + ".sav");
 		try {
-			SaveStore.writeAtomic(out, save);
+			Path out = writeExport(save, "");
 			toast("Exported gbalink/exports/" + out.getFileName(), 5000);
-			LOG.info("Exported save to {}", out);
 		} catch (IOException e) {
 			toast("Export failed: " + e.getMessage());
 		}
+	}
+
+	private Path writeExport(byte[] save, String suffix) throws IOException {
+		String stamp = java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss"));
+		Path out = cfg.exportDir().resolve(SaveRules.safeFileName(title) + "-" + stamp + suffix + ".sav");
+		SaveStore.writeAtomic(out, save);
+		LOG.info("Exported save to {}", out);
+		return out;
+	}
+
+	/**
+	 * Import (emulator thread): export the current save as a backup, upload the new one (the server keeps its own
+	 * bak1..3), and on the server's ack discard the suspend state and cold-boot the core from the imported save.
+	 */
+	private void doImport(String fileName, byte[] data) {
+		String why = SaveRules.validateImportSize(data.length);
+		if (why != null) { toast("Import failed: " + why, 5000); return; }
+		if (suppressNet) { toast("Import failed: not connected to the server", 5000); return; }
+		waitInflight(3000); // an earlier upload must not land after the import
+		byte[] current = readSave();
+		if (current != null && current.length > 0) {
+			try {
+				writeExport(current, "-before-import");
+			} catch (IOException e) {
+				toast("Import cancelled: could not back up the current save (" + e.getMessage() + ")", 6000);
+				return;
+			}
+		}
+		String rev = SaveRules.revision(data);
+		Inflight f = new Inflight(rev, data, new java.util.concurrent.CountDownLatch(1));
+		inflight = f;
+		int off = 0;
+		do {
+			int len = Math.min(CHUNK, data.length - off);
+			sendQuiet(new Payloads.ImportChunk(pakId, off, data.length, Arrays.copyOfRange(data, off, off + len)));
+			off += len;
+		} while (off < data.length);
+		boolean got = false;
+		try {
+			got = f.done().await(5000, java.util.concurrent.TimeUnit.MILLISECONDS);
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+		}
+		if (!got || !rev.equals(currentRev)) {
+			if (inflight == f) inflight = null;
+			toast(got ? "The server refused the import" : "The server did not answer - import cancelled", 6000);
+			return;
+		}
+		forceUpload = false;
+		resumed = false;
+		try {
+			Files.deleteIfExists(cfg.suspendFile());
+		} catch (IOException e) {
+			LOG.warn("Could not delete {}", cfg.suspendFile(), e);
+		}
+		core.close();
+		core = new GbaCore(natives);
+		if (core.loadRom(romPath) < 0) throw new IllegalStateException("Could not reload " + romPath.getFileName());
+		if (core.loadSave(data) < 0) LOG.warn("Core rejected the imported save for pak {}", pakId);
+		link.bind(core);
+		link.apply(link.index(), link.count(), link.names());
+		LOG.info("Imported {} ({} bytes) into pak {}; core restarted", fileName, data.length, pakId);
+		toast("Imported " + fileName, 5000);
 	}
 
 	private void doSaveState() {

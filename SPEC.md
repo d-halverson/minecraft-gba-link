@@ -41,7 +41,7 @@ typedef struct gba_core gba_core;
                                   to continue the SAME frame */
 #define GBA_RUN_ERROR     -1
 
-uint32_t    gba_api_version(void);              /* returns 1 for this spec */
+uint32_t    gba_api_version(void);              /* returns 2 for this spec (1 = without gba_set_rtc) */
 gba_core*   gba_create(void);
 void        gba_destroy(gba_core*);
 
@@ -84,6 +84,14 @@ void        gba_link_configure(gba_core*, int player_index, int player_count);
 size_t      gba_link_poll_outgoing(gba_core*, uint8_t* out, size_t cap);
 /* Deliver one message received from another player. */
 void        gba_link_deliver(gba_core*, int from_player_index, const uint8_t* data, size_t len);
+
+/* ---- Virtual RTC (API version 2) ----
+   GBA_RTC_WALL 0 (default): wall clock + local time zone. GBA_RTC_VIRTUAL 1: the cartridge clock reads epoch_seconds
+   (UNIX, UTC) at the time of the call and advances with emulated time (frameCounter * 280896 cycles / 16777216 Hz);
+   time zone ignored. Call after gba_load_rom and before gba_load_save/gba_load_state. 0 ok, <0 bad argument. */
+#define GBA_RTC_WALL    0
+#define GBA_RTC_VIRTUAL 1
+int         gba_set_rtc(gba_core*, int64_t epoch_seconds, int mode);
 ```
 
 Link semantics (implemented in the shim, invisible to Java): lockstep at the serial-transfer
@@ -100,18 +108,25 @@ The mod binds the ABI with the Java 25 Foreign Function & Memory API (no JNI). T
 extracts `natives/<os>-<arch>/<lib>` from the jar to `<gameDir>/gbalink/natives/` and loads
 it. If no native exists for the platform the emulator UI says so instead of crashing.
 
+**Audio output (client).** One JavaSound line per output (emulator 32768 Hz stereo, CRT spectators 16 kHz stereo) is
+opened once and never stopped or closed (closing can hang on macOS). `emu/LineFeeder` keeps each line well behaved: audio
+is faded in over ~10 ms after a pause; when the writer stalls (> 22 ms) and the real audio is about to run out it queues a
+~10 ms ramp to zero and then keeps the line topped up with zeros (~60 ms), so an idle line never underruns and never
+replays stale buffer contents. It is tested against a fake device (`LineFeederTest`).
+
 ## Network protocol (Fabric custom payloads, namespace `gbalink`)
 
 Only sent to clients where `ServerPlayNetworking.canSend` is true. Vanilla / non-gbalink
 clients must be able to join and see the items (no new synced registry entries, no custom
 command argument types).
 
-Protocol number: **3** (0.3.0; 2 was 0.2.0). Hello/Welcome carry it; mismatches never crash: the server refuses to `open`
+Protocol number: **4** (0.4.0; 3 was 0.3.0, 2 was 0.2.0). Hello/Welcome carry it; mismatches never crash: the server refuses to `open`
 for a client with a different protocol ("update the mod"), and a client treats a server that sends no `welcome`
 (protocol 1) as unable to do revisions/imports and shows "update the mod". New fields are appended last and
 decoded tolerantly.
 
-- C2S `hello` {protocol} — client announces the mod and its protocol.
+- C2S `hello` {protocol, caps} — client announces the mod and its protocol. `caps` (new in 0.4.0, appended; 0 if absent)
+  is a bit set: bit 0 = the client can run netplay (native API version 2).
 - S2C `welcome` {protocol} — server's protocol (new in 2; only sent if the client can receive it).
 - S2C `open` {pakId UUID, romSha1 hex, title, save bytes, revision} — open emulator for this pak.
   `revision` (new in 2, appended; "" if absent) = lowercase hex SHA-256 of `save` (a missing save is the hash
@@ -121,23 +136,99 @@ decoded tolerantly.
 - S2C `save_ack` {pakId, revision, accepted, message} — (new in 2) sent after every completed upload or import.
   `revision` is the SHA-256 of what the server now stores (unchanged if `accepted` is false). The client
   computes SHA-256 of what it sent; equal means confirmed. A suspend state records that revision.
-- C2S `import_chunk` {offset, total, bytes ≤ 30000} — (new in 2) initial save for the pak this player just
-  burned. Server accepts it once, within 120 s of the burn, only while the pak has no save, and only with a
-  size of 512 B / 8 / 32 / 64 / 128 KiB (+16 byte RTC footer optional), at most 512 KiB; otherwise it answers
-  with a message (and `save_ack` accepted=false).
+- C2S `import_save` {pakId, offset, total, bytes ≤ 30000} — (new in 4; replaces 2/3's burn-time `import_chunk`)
+  replace the save of the pak this player **currently has open** (an open session for exactly that pak, GBA or CRT)
+  with an imported one. Same chunking as `save_chunk`, rate limited together with uploads. Accepted only with a size of
+  512 B / 8 / 32 / 64 / 128 KiB (+16 byte RTC footer optional), at most 512 KiB (`SaveRules.importRejection`); the
+  previous save is kept as `<pakId>.sav.bak1` (older ones shift to `.bak2`, `.bak3`, the oldest is dropped) and any
+  half-finished normal upload is dropped. The server always answers with `save_ack` (accepted=false and the unchanged
+  revision if refused, e.g. no open session or a bad size). Imports for a pak the player does not have open are ignored.
 - C2S `close` {pakId}
 - C2S `burn` {romSha1, title, gameCode} — turn a held Blank Game Pak into a Pak for this ROM.
-- S2C `link_state` {playerIndex, playerCount, names[]} — (count < 2 = unplugged)
+- S2C `link_state` {playerIndex, playerCount, names[], mode} — (count < 2 = unplugged). `mode` (new in 0.4.0, appended; 0 if
+  absent): 0 = classic link, 1 = netplay (the classic cable stays unplugged, `netplay_start` follows).
 - C2S `link_data` {bytes ≤ 64} → server → S2C `link_data` {fromIndex, bytes} to other members.
 
 Revision guard: client-side suspend file `gbalink/suspend/<pakId>.state` = magic, version, revision, ROM SHA-1,
 confirmed flag, core state. On `open` it is resumed only if its revision equals the `open` revision and the ROM
-SHA-1 matches; otherwise it is deleted and the game cold-boots with the server save. On suspend the client
+SHA-1 matches; otherwise it is deleted and the game cold-boots with the server save. On import (client): the current save is exported to `exports/<game>-<time>-before-import.sav`, the new one is uploaded
+with `import_save`, and on an accepting `save_ack` (revision equals the SHA-256 of what was sent) the suspend file for that
+pak is deleted, the local mirror is rewritten and the core is reloaded from the imported save (cold boot, same session).
+On suspend the client
 uploads the save if changed, waits for the `save_ack`, and records the revision from the ack (or the SHA-256 of
 what it sent, flagged unconfirmed, if no ack arrives or the connection is gone).
 
 `gba_get_save` returns mGBA's battery format: the raw SRAM/Flash/EEPROM image, plus a 16-byte RTC footer for
 cartridges with a clock. `gba_get_save` resets the "dirty" flag.
+
+## Netplay link (0.4.0, protocol 4)
+
+**Why.** The classic link (above) is lockstep: the master core blocks for a network round trip on every serial transfer
+(measured 17 fps at 50 ms RTT, 9 fps at 100 ms; the games' own link checks fail at 50 ms and more). Netplay instead
+makes every linked client simulate ALL linked consoles locally, connected through the link-message path with zero
+latency in one thread (`NetplaySim`); only controller inputs cross the network, with an adaptive input delay.
+
+**Mode selection (server, `GbaServer.sendRoom`, `EffectiveLink.netplay`).** The effective link is the room's members with
+an open emulator session (GBA or CRT). Netplay when it has at least 2 players, every client announced `CAP_NETPLAY`, and
+every pak has the same ROM SHA-1 (remembered per open session). Otherwise the classic link ("Link (different games -
+slow mode)"). `link_state.mode` tells the clients which; for netplay the server then sends `netplay_start` to every member.
+Any change of the effective link (join, leave, close, cable break, distance, disconnect) sends a new `link_state` and, if
+at least two players remain with the same ROM, a new `netplay_start` with a new session id (the old session is dead).
+
+**Session start.**
+1. S2C `netplay_start` {sessionId (varlong), index, count, names[], epoch (long, server UTC seconds), tzOffset (int, server
+   zone offset), delay (initial input delay, 3)}. index = effective player index = console index (0 is the link master).
+2. The client stops its core at a frame boundary and takes state + battery save of its own console, builds the blob
+   (below), deflates it and uploads it with C2S `netplay_snapshot`; the server relays each chunk to the other members as
+   S2C `netplay_snapshot` (with `from`). "Connecting link..." is shown meanwhile; after 15 s without all snapshots the
+   client falls back to a standalone game with a message.
+3. With all snapshots, the client creates FRESH cores for every console (its own too: link state outside the save state
+   would otherwise differ between machines), loads ROM, `gba_set_rtc(epoch + tzOffset + frame*280896/16777216, VIRTUAL)`,
+   save, state, `gba_link_configure(i, count)`, and starts at netplay frame 0 (the virtual clock therefore shows the
+   server's local time).
+
+Snapshot blob (deflate level 1 of): `int 0x4E505331, int frame, int delay, byte n, n x { byte player, int stateLen, state,
+int saveLen, save }`. Start: one entry (the sender's console, frame 0). Resync: all consoles, from player 0, frame = the
+netplay frame about to run, delay = the delay in effect. Chunks are at most 30000 bytes, in order; total at most 4 MiB.
+
+**Running.** Frame f runs when the records of all players for f are known.
+- C2S `netplay_input` {sessionId, firstFrame, recs[], sendMs, echo[]}; the server relays it from the Netty thread (like
+  `link_data`, no tick wait) as S2C `netplay_input` {sessionId, from, ...}; the client receives it on the network thread
+  (`ClientNetplayFastPathMixin`). One record is a short: keys in bits 0-9 and the sender's delay proposal in bits 10-13. A
+  packet carries the last 3 records (redundancy). At frame s a player samples its keys and sends the record for frame
+  s + delay; raising the delay fills the gap with the new sample, lowering it skips samples; records below the initial delay
+  are implicit (no keys, proposal = initial delay). First record wins.
+- `echo` is a flat list of (player, theirSendMs, holdMs) triples: the sender's last received timestamp from each peer and
+  how long it held it. The receiver computes RTT = now - theirSendMs - holdMs.
+- Stepping (identical on every machine, versioned with the protocol): inputs set for every console; core 0 runs; whenever it
+  returns LINK_WAIT its messages are delivered to cores 1..n-1 in index order, their immediate replies back to core 0; if core
+  0 is still stuck every other core runs a frame in index order (core 0 gets their replies after each); cores that did not
+  run yet run after core 0 finishes; the other consoles' audio is drained and discarded; everything in flight is delivered.
+- Display, audio and the CRT stream use only the local console. Pacing 59.7275 fps; after a stall the client may catch up
+  (if more than 100 ms behind it skips ahead instead). Stalls are counted; 10 s without a partner's records fails the session.
+- **Adaptive delay.** Proposal = ceil((p99 RTT over 5 s / 2 + 8 ms) / 16.74 ms), clamped to 2-10 frames, raised at once on a
+  stall (at most once per second), lowered by one after 10 s without stalls. The delay actually used is the maximum of all
+  proposals found in the records of the frame just simulated, applied from the next frame, so every client switches at the
+  same simulated frame.
+- **Desync.** After every 60th frame each client sends C2S `netplay_hash` {sessionId, gen, frame, hash} (relayed as S2C
+  with `from`); hash = CRC32 over the complete save states of all consoles in index order. A mismatch is logged to
+  `link.log` (and a toast shown); player 0 then snapshots all consoles and sends them as `netplay_snapshot` with gen+1 and the
+  frame; every client reloads fresh cores from it and continues from that frame (clients that were already further replay
+  the stored inputs). A client that waits more than 10 s for a resync snapshot, or fails otherwise, may send C2S
+  `netplay_restart` {sessionId}; the server restarts the session for everybody (at most every 3 s).
+- **Saves.** Every client uploads only its own console's save (the normal save/revision/ack path, every 10 s when dirty).
+  Closing the GBA leaves the link first, so the suspend state is the local console's state.
+- **Leaving.** The server ends the session for everyone on any change of the effective link; a client whose session is not
+  continued (link_state unplugged or classic, failure, timeout) turns its local simulation core back into the normal
+  standalone session, keeping its state, cable unplugged, wall-clock RTC again.
+- **Disabled while netplay is active** (toast): fast-forward, save/load state, import. The power switch closes the session
+  (which leaves the link first).
+
+Payloads (new in 0.4.0; protocol number unchanged at 4 for this release):
+- S2C `netplay_start`, C2S/S2C `netplay_input`, `netplay_hash`, `netplay_snapshot` (S2C adds `from`), C2S `netplay_restart`.
+- The server rate-limits relayed input/hash packets (token bucket, 5000/s) and snapshot uploads (6 MiB burst, 2 MiB/s).
+- Determinism requirements on the native side: see native/README.md (virtual RTC, state load bookkeeping, zeroed states).
+  `-Dgbalink.relaydelay=<ms>` (server, dev) delays relayed netplay and link packets by that many ms one way.
 
 ## Items (vanilla-compatible, no registered items)
 
@@ -168,7 +259,9 @@ mode) removes all parts and drops exactly one CRT item with its pak. Vanilla cli
 **Playing:** sneak+use with a Pak in the offhand inserts it (sneak+use, empty offhand, ejects; refused while someone
 plays). Use (not sneaking) → server `crt_open` → the client runs the normal `EmulatorSession` for the pak (same saves,
 revisions, suspend, link cable) but in *CRT mode*: a transparent, non-pausing control screen captures the GBA keys (no
-bezel GUI; Esc leaves = suspends; small hint line), the camera eases towards the screen, and the game renders onto the
+bezel GUI; Esc leaves = suspends; small hint line; the crosshair, held item and HUD are hidden like F1 for the duration and the previous F1 state is
+restored on leaving, see `ui/HudHider`; `E` exports and `I` imports the save, the import screens open on top and give the
+session back), the camera eases towards the screen, and the game renders onto the
 TV in the world (own session: every rendered frame). Only one player can play a CRT at a time (server-enforced). The
 server ends play (`crt_view` state 0 to the player) if the TV is broken or the player walks > 18 blocks away.
 

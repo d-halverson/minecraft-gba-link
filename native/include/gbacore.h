@@ -1,5 +1,5 @@
 /* gbacore.h - C ABI of the GBA emulator shim (mGBA 0.10.5 + serial-level link cable).
- * Contract: gba/SPEC.md. API version 1. */
+ * Contract: gba/SPEC.md. API version 2. */
 #ifndef GBACORE_H
 #define GBACORE_H
 
@@ -38,7 +38,7 @@ typedef struct gba_core gba_core;
                                   to continue the SAME frame */
 #define GBA_RUN_ERROR     -1
 
-GBA_API uint32_t    gba_api_version(void);              /* returns 1 for this spec */
+GBA_API uint32_t    gba_api_version(void);              /* returns 2 for this spec (1 = no gba_set_rtc) */
 GBA_API gba_core*   gba_create(void);
 GBA_API void        gba_destroy(gba_core*);
 
@@ -81,6 +81,18 @@ GBA_API void        gba_link_configure(gba_core*, int player_index, int player_c
 GBA_API size_t      gba_link_poll_outgoing(gba_core*, uint8_t* out, size_t cap);
 /* Deliver one message received from another player. */
 GBA_API void        gba_link_deliver(gba_core*, int from_player_index, const uint8_t* data, size_t len);
+
+/* ---- Virtual RTC (API version 2) ----
+   mode GBA_RTC_WALL (0, default): the cartridge clock follows the machine's wall clock and local time zone.
+   mode GBA_RTC_VIRTUAL (1): the clock reads epoch_seconds (UNIX time, UTC) NOW and then advances with *emulated*
+   time (one video frame = 280896 cycles at 16777216 Hz); the time zone is ignored (UTC). Needed for input-sync
+   netplay, where every machine must see the same clock. Call it after gba_load_rom and BEFORE gba_load_save /
+   gba_load_state; loading a state keeps the virtual clock where it was. While any core is in virtual mode the
+   process time zone for C library time conversions is forced to UTC (restored when the last one leaves).
+   Switching back to GBA_RTC_WALL keeps the in-game clock continuous. Returns 0, <0 on a bad argument. */
+#define GBA_RTC_WALL    0
+#define GBA_RTC_VIRTUAL 1
+GBA_API int         gba_set_rtc(gba_core*, int64_t epoch_seconds, int mode);
 
 #ifdef __cplusplus
 }

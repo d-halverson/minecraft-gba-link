@@ -7,7 +7,10 @@
   "authors": ["Drew Halverson"],
   "license": "MIT",
   "environment": "*",
-  "mixins": ["gbalink.mixins.json"],
+  "mixins": [
+    "gbalink.mixins.json",
+    { "config": "gbalink.client.mixins.json", "environment": "client" }
+  ],
   "entrypoints": {
     "main": ["com.drew.gba.GbaLink"],
     "client": ["com.drew.gba.client.GbaLinkClient"]

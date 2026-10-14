@@ -21,10 +21,12 @@
 #include <mgba-util/vfs.h>
 
 #include <fcntl.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
-#define GBA_API_VERSION 1u
+#define GBA_API_VERSION 2u
 
 /* ------------------------------------------------------------------------------------ */
 /* link layer                                                                           */
@@ -108,6 +110,7 @@ struct gba_core {
 	uint64_t lastSaveHash;
 	int16_t* ring;
 	size_t ringHead, ringCount;
+	bool rtcVirtual;        /* virtual RTC active (holds one reference on the process-wide UTC time zone) */
 	struct gba_link link;
 };
 
@@ -475,6 +478,15 @@ static void linkReset(struct gba_link* L) {
 	L->mstate = M_IDLE;
 	L->cstate = C_IDLE;
 	L->announced = -2;
+	/* Link bookkeeping that is not part of a save state gets fixed values here (this runs on load_rom, reset and
+	 * load_state), so a core that loads a state behaves exactly like any other core that loads the same state.
+	 * Input-sync netplay relies on that for bit-exact determinism between machines. */
+	L->ranSinceDone = true;
+	L->pendSettled = false;
+	L->pendAge = 0;
+	L->seq = 0;
+	L->cseq = 0;
+	L->qhead = L->qtail = 0;
 	struct GBASIO* s = sio(L);
 	s->siocnt &= ~0x0080;
 	sioRefresh(L);
@@ -604,6 +616,84 @@ static void linkInit(struct gba_core* c) {
 }
 
 /* ------------------------------------------------------------------------------------ */
+/* virtual RTC                                                                          */
+/* ------------------------------------------------------------------------------------ */
+
+/* mGBA turns the clock into the cartridge's BCD registers with localtime_r() and mktime(), i.e. through the process
+ * time zone. The virtual clock must read the same on every machine, so while at least one core uses it the process
+ * time zone is forced to UTC (reference counted, restored when the last such core leaves virtual mode). Java and
+ * Minecraft keep their own zone data, so this does not affect them; only C library time conversions are affected. */
+static atomic_flag g_tzLock = ATOMIC_FLAG_INIT;
+static int g_tzUsers;
+static char* g_tzSaved;
+
+static void tzLock(void) { while (atomic_flag_test_and_set_explicit(&g_tzLock, memory_order_acquire)) { } }
+static void tzUnlock(void) { atomic_flag_clear_explicit(&g_tzLock, memory_order_release); }
+
+static void tzAcquire(void) {
+	tzLock();
+	if (g_tzUsers++ == 0) {
+		const char* t = getenv("TZ");
+		g_tzSaved = t ? strdup(t) : NULL;
+#ifdef _WIN32
+		_putenv_s("TZ", "UTC0");
+		_tzset();
+#else
+		setenv("TZ", "UTC", 1);
+		tzset();
+#endif
+	}
+	tzUnlock();
+}
+
+static void tzRelease(void) {
+	tzLock();
+	if (g_tzUsers > 0 && --g_tzUsers == 0) {
+#ifdef _WIN32
+		_putenv_s("TZ", g_tzSaved ? g_tzSaved : "");
+		_tzset();
+#else
+		if (g_tzSaved) {
+			setenv("TZ", g_tzSaved, 1);
+		} else {
+			unsetenv("TZ");
+		}
+		tzset();
+#endif
+		free(g_tzSaved);
+		g_tzSaved = NULL;
+	}
+	tzUnlock();
+}
+
+/* Milliseconds the generic RTC source (RTC_FAKE_EPOCH) reports right now; mirrors mGBA's _rtcGenericCallback. */
+static int64_t rtcFakeMs(struct mCore* core) {
+	return core->rtc.value + (int64_t) core->frameCounter(core) * ((int64_t) core->frameCycles(core) * 1000LL) / core->frequency(core);
+}
+
+static uint8_t unBcd(uint8_t b) { return (uint8_t) ((b >> 4) * 10 + (b & 0xF)); }
+
+/* After leaving the virtual clock: recompute the save-time offset exactly like GBASavedataRTCRead does, but with the
+ * local time zone again, so the in-game clock continues from the time it showed instead of jumping by the UTC offset. */
+static void rtcRebaseOffset(gba_core* c) {
+	struct GBACartridgeHardware* hw = &c->gba->memory.hw;
+	if (!(hw->devices & HW_RTC) || hw->rtc.lastLatch == 0) {
+		return;
+	}
+	struct tm date;
+	memset(&date, 0, sizeof(date));
+	date.tm_year = unBcd(hw->rtc.time[0]) + 100;
+	date.tm_mon = unBcd(hw->rtc.time[1]) - 1;
+	date.tm_mday = unBcd(hw->rtc.time[2]);
+	date.tm_hour = unBcd(hw->rtc.time[4]);
+	date.tm_min = unBcd(hw->rtc.time[5]);
+	date.tm_sec = unBcd(hw->rtc.time[6]);
+	date.tm_isdst = -1;
+	time_t t = mktime(&date);
+	hw->rtc.offset = hw->rtc.lastLatch - t;
+}
+
+/* ------------------------------------------------------------------------------------ */
 /* core                                                                                 */
 /* ------------------------------------------------------------------------------------ */
 
@@ -650,6 +740,10 @@ GBA_API void gba_destroy(gba_core* c) {
 		return;
 	}
 	c->link.dead = true;
+	if (c->rtcVirtual) {
+		c->rtcVirtual = false;
+		tzRelease();
+	}
 	mCoreConfigDeinit(&c->core->config);
 	c->core->deinit(c->core); /* unloads ROM, closes the save VFile and frees the core */
 	free(c->video);
@@ -954,6 +1048,7 @@ GBA_API size_t gba_save_state(gba_core* c, uint8_t* out, size_t cap) {
 	if (cap < n) {
 		return 0;
 	}
+	memset(out, 0, n); /* padding and unused fields must not carry stale bytes: states are hashed for desync checks */
 	if (!c->core->saveState(c->core, out)) {
 		return 0;
 	}
@@ -964,12 +1059,17 @@ GBA_API int gba_load_state(gba_core* c, const uint8_t* data, size_t len) {
 	if (!c || !c->romLoaded || !data || len != c->core->stateSize(c->core)) {
 		return -1;
 	}
+	int64_t clockMs = c->rtcVirtual ? rtcFakeMs(c->core) : 0;
 	if (!c->core->loadState(c->core, data)) {
 		return -2;
 	}
 	/* in-flight link transfers are not part of a state: drop them */
 	c->frameActive = false;
 	linkReset(&c->link);
+	if (c->rtcVirtual) {
+		/* the state carries its own frame counter; keep the virtual clock where it was instead of jumping */
+		c->core->rtc.value += clockMs - rtcFakeMs(c->core);
+	}
 	return 0;
 }
 
@@ -1066,11 +1166,45 @@ GBA_API void gba_link_deliver(gba_core* c, int from, const uint8_t* d, size_t le
 	}
 }
 
+/* ---- virtual RTC ---- */
+
+GBA_API int gba_set_rtc(gba_core* c, int64_t epoch_seconds, int mode) {
+	if (!c) {
+		return -1;
+	}
+	struct mRTCGenericSource* rtc = &c->core->rtc;
+	if (mode == GBA_RTC_VIRTUAL) {
+		if (!c->rtcVirtual) {
+			tzAcquire();
+			c->rtcVirtual = true;
+		}
+		rtc->override = RTC_FAKE_EPOCH;
+		rtc->value = 0;
+		rtc->value = epoch_seconds * 1000LL - rtcFakeMs(c->core);
+		return 0;
+	}
+	if (mode == GBA_RTC_WALL) {
+		if (c->rtcVirtual) {
+			c->rtcVirtual = false;
+			rtc->override = RTC_NO_OVERRIDE;
+			rtc->value = 0;
+			tzRelease();
+			rtcRebaseOffset(c);
+		}
+		return 0;
+	}
+	return -2;
+}
+
 /* ---- private test hooks ---- */
 
 uint32_t gba_priv_read32(gba_core* c, uint32_t addr) { return c->core->busRead32(c->core, addr); }
 uint16_t gba_priv_read16(gba_core* c, uint32_t addr) { return (uint16_t) c->core->busRead16(c->core, addr); }
 void gba_priv_write32(gba_core* c, uint32_t addr, uint32_t v) { c->core->busWrite32(c->core, addr, v); }
+int64_t gba_priv_rtc_unix(gba_core* c) {
+	struct mRTCSource* r = c->gba->rtcSource;
+	return r ? (int64_t) r->unixTime(r) : 0;
+}
 int gba_priv_link_waiting(gba_core* c) {
 	return c->link.mstate == M_WAIT || c->link.cstate == C_BUSY;
 }

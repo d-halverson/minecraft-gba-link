@@ -27,7 +27,7 @@ import static java.lang.foreign.ValueLayout.JAVA_LONG;
 public final class GbaNative {
 	public static final int WIDTH = 240, HEIGHT = 160, AUDIO_RATE = 32768, LINK_MSG_MAX = 64;
 	public static final int RUN_FRAME_DONE = 0, RUN_LINK_WAIT = 1, RUN_ERROR = -1;
-	public static final int API_VERSION = 1;
+	public static final int API_VERSION = 2, MIN_API_VERSION = 1, RTC_WALL = 0, RTC_VIRTUAL = 1;
 
 	private static GbaNative instance;
 	private static String loadError;
@@ -35,8 +35,12 @@ public final class GbaNative {
 	final MethodHandle apiVersion, create, destroy, loadRom, reset, romInfo, setKeys, runFrame, framebuffer, readAudio;
 	final MethodHandle saveSize, getSave, loadSave, saveDirty, stateSize, saveState, loadState;
 	final MethodHandle linkConfigure, linkPollOutgoing, linkDeliver;
+	/** gba_set_rtc (API 2); null for a version 1 library. */
+	final MethodHandle setRtc;
+	final int version;
 
-	private GbaNative(SymbolLookup lib) {
+	private GbaNative(SymbolLookup lib, int version) {
+		this.version = version;
 		Linker l = Linker.nativeLinker();
 		apiVersion = h(l, lib, "gba_api_version", FunctionDescriptor.of(JAVA_INT));
 		create = h(l, lib, "gba_create", FunctionDescriptor.of(ADDRESS));
@@ -58,7 +62,11 @@ public final class GbaNative {
 		linkConfigure = h(l, lib, "gba_link_configure", FunctionDescriptor.ofVoid(ADDRESS, JAVA_INT, JAVA_INT));
 		linkPollOutgoing = h(l, lib, "gba_link_poll_outgoing", FunctionDescriptor.of(JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG));
 		linkDeliver = h(l, lib, "gba_link_deliver", FunctionDescriptor.ofVoid(ADDRESS, JAVA_INT, ADDRESS, JAVA_LONG));
+		setRtc = version >= 2 ? h(l, lib, "gba_set_rtc", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG, JAVA_INT)) : null;
 	}
+
+	/** True if the library has the virtual RTC (API 2), which input-sync netplay needs. */
+	public boolean supportsNetplay() { return setRtc != null; }
 
 	private static MethodHandle h(Linker l, SymbolLookup lib, String name, FunctionDescriptor fd) {
 		MemorySegment sym = lib.find(name).orElseThrow(() -> new UnsatisfiedLinkError("missing symbol " + name));
@@ -115,12 +123,12 @@ public final class GbaNative {
 				}
 			}
 			SymbolLookup lib = SymbolLookup.libraryLookup(target, Arena.global());
-			GbaNative n = new GbaNative(lib);
-			int v = (int) n.apiVersion.invokeExact();
-			if (v != API_VERSION) {
-				loadError = "GBA emulator library has API version " + v + ", expected " + API_VERSION + ".";
+			int v = (int) h(Linker.nativeLinker(), lib, "gba_api_version", FunctionDescriptor.of(JAVA_INT)).invokeExact();
+			if (v < MIN_API_VERSION || v > API_VERSION) {
+				loadError = "GBA emulator library has API version " + v + ", expected " + MIN_API_VERSION + " to " + API_VERSION + ".";
 				return null;
 			}
+			GbaNative n = new GbaNative(lib, v);
 			instance = n;
 			return n;
 		} catch (Throwable t) {

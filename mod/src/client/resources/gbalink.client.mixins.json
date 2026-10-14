@@ -1,0 +1,11 @@
+{
+  "required": true,
+  "package": "com.drew.gba.client.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "client": [
+    "ClientNetplayFastPathMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

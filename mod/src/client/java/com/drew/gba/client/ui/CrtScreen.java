@@ -26,6 +26,8 @@ public final class CrtScreen extends Screen {
 	private int turnTicks;
 	private float startYaw, startPitch;
 	private boolean turnInit;
+	private boolean childOpen;
+	private final HudHider hud = new HudHider();
 
 	public CrtScreen(EmulatorSession session, UUID crtId) {
 		super(Component.literal("CRT TV"));
@@ -37,11 +39,37 @@ public final class CrtScreen extends Screen {
 	/** The server ended our play (TV broken, walked away): leave the screen. */
 	public static void serverEnded(UUID crtId) {
 		CrtScreen s = open;
-		if (s != null && s.crtId.equals(crtId) && s.minecraft != null) s.minecraft.execute(s::onClose);
+		if (s != null && s.crtId.equals(crtId) && s.minecraft != null) s.minecraft.execute(() -> {
+			s.childOpen = false;
+			if (s.minecraft.gui.screen() != s) { s.removed(); s.minecraft.gui.setScreen(null); } // an import screen is on top
+			else s.onClose();
+		});
+	}
+
+	@Override
+	protected void init() {
+		hud.hide(minecraft); // no crosshair, hand or HUD while playing; restored in removed()
+	}
+
+	/** E exports the cartridge's save to gbalink/exports, I opens the import picker (the game keeps running behind it). */
+	private boolean menuKey(int key) {
+		if (key == com.mojang.blaze3d.platform.InputConstants.KEY_E) {
+			session.exportSaveAsync();
+			return true;
+		}
+		if (key == com.mojang.blaze3d.platform.InputConstants.KEY_I) {
+			session.releaseAll();
+			session.turbo = false;
+			childOpen = true;
+			ImportConfirmScreen.begin(this, session);
+			return true;
+		}
+		return false;
 	}
 
 	@Override
 	public boolean keyPressed(KeyEvent event) {
+		if (menuKey(event.key())) return true;
 		if (GbaKeys.press(session, event.key(), this::powerOff)) return true;
 		return super.keyPressed(event); // Esc closes
 	}
@@ -103,9 +131,19 @@ public final class CrtScreen extends Screen {
 			double d = minecraft.player.getEyePosition().distanceTo(new net.minecraft.world.phys.Vec3(c[0], c[1], c[2]));
 			if (d < 2.2) line = "Step back a little to see the whole picture";
 		}
-		if (line.isEmpty()) line = "Esc: leave   Arrows X Z A S Enter Backspace   Space: fast-forward   F5/F8: state   P: power off";
-		int w = font.width(line);
-		g.text(font, line, (width - w) / 2, height - 12, session.error() != null ? 0xFFFF8888 : 0x99FFFFFF, true);
+		boolean hint = line.isEmpty();
+		int statsY = height - 23;
+		if (hint) { // two short lines: the full list does not fit a normal window in one
+			String l1 = "Arrows X Z A S Enter Backspace   Space: fast-forward   F5/F8: state";
+			String l2 = "Esc: leave   E: export .sav   I: import .sav   P: power off";
+			g.text(font, l1, (width - font.width(l1)) / 2, height - 22, 0x99FFFFFF, true);
+			g.text(font, l2, (width - font.width(l2)) / 2, height - 12, 0x99FFFFFF, true);
+			statsY = height - 33;
+		} else {
+			g.text(font, line, (width - font.width(line)) / 2, height - 12, session.error() != null ? 0xFFFF8888 : 0x99FFFFFF, true);
+		}
+		String stats = session.error() != null ? "" : session.linkStatsLine();
+		if (!stats.isEmpty()) g.text(font, stats, (width - font.width(stats)) / 2, statsY, 0x80FFFFFF, true);
 	}
 
 	@Override
@@ -115,8 +153,10 @@ public final class CrtScreen extends Screen {
 
 	@Override
 	public void removed() {
+		if (childOpen) { childOpen = false; return; } // only switching to the import screens
 		if (closed) return;
 		closed = true;
+		hud.restore(minecraft);
 		if (open == this) open = null;
 		session.requestStop();
 		try {

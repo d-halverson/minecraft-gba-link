@@ -247,7 +247,7 @@ public final class CrtServer {
 		endForPlayer(p.getUUID());
 		PakData pak = st.pak();
 		byte[] save = gba.store().read(pak.pakId());
-		gba.openSession(p, pak.pakId());
+		gba.openSession(p, pak.pakId(), pak.sha1());
 		Live l = new Live(st.crtId(), p, p.level().dimension(), e.getX(), e.getY(), e.getZ(), st.yaw());
 		live.put(l.crtId, l);
 		byPlayer.put(p.getUUID(), l.crtId);

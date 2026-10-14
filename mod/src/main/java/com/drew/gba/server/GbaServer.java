@@ -47,21 +47,29 @@ public final class GbaServer {
 	private final LinkRooms<UUID> rooms = new LinkRooms<>();
 	/** Player -> pak id they currently have open. */
 	private final Map<UUID, UUID> sessions = new HashMap<>();
+	/** Player -> ROM SHA-1 of the pak they have open (decides netplay vs classic link). */
+	private final Map<UUID, String> sessionSha1 = new HashMap<>();
+	/** Netplay session each player is in (absent = classic link or none). */
+	private final Map<UUID, NpSession> np = new HashMap<>();
+	private long npCounter;
+	private final Map<UUID, Long> npRestartAt = new HashMap<>();
+	private record NpSession(long id, List<UUID> members) {}
+	/** Capabilities each client announced in Hello (Payloads.Hello.CAP_*). */
+	private static final Map<UUID, Integer> clientCaps = new java.util.concurrent.ConcurrentHashMap<>();
 	private final Map<UUID, SaveAssembler> assemblers = new HashMap<>();
 	private final Map<UUID, TokenBucket> saveLimit = new HashMap<>();
 	private final Map<UUID, TokenBucket> burnLimit = new HashMap<>();
 	private final Map<UUID, Long> lastSaveWrite = new HashMap<>();
 	private final Map<UUID, SaveAssembler> importAssemblers = new HashMap<>();
-	/** Player -> the pak they just burned and may still import an initial save into. */
-	private final Map<UUID, PendingBurn> pendingBurns = new HashMap<>();
 	/** Protocol number each player's client announced in Hello (absent = no hello yet). */
 	private static final Map<UUID, Integer> clientProtocol = new java.util.concurrent.ConcurrentHashMap<>();
-	private record PendingBurn(UUID pakId, long at) {}
 	private SaveStore store;
 	/** Last link_state sent per player (dedupe). */
 	private final Map<UUID, EffectiveLink.State> lastSent = new HashMap<>();
 	private final Map<UUID, Integer> cableCooldown = new HashMap<>();
 	private int tickCounter;
+	/** Link messages relayed per sender, for the periodic per-room line in latest.log. */
+	private static final RelayCounters RELAYED = new RelayCounters(5000);
 
 	final CrtServer crt;
 
@@ -75,6 +83,7 @@ public final class GbaServer {
 	public static void init() {
 		ServerPlayNetworking.registerGlobalReceiver(Payloads.Hello.TYPE, (p, ctx) -> {
 			clientProtocol.put(ctx.player().getUUID(), p.protocol());
+			clientCaps.put(ctx.player().getUUID(), p.caps());
 			if (ServerPlayNetworking.canSend(ctx.player(), Payloads.Welcome.TYPE)) {
 				ServerPlayNetworking.send(ctx.player(), new Payloads.Welcome(Payloads.PROTOCOL));
 			}
@@ -87,6 +96,10 @@ public final class GbaServer {
 		ServerPlayNetworking.registerGlobalReceiver(Payloads.SaveChunk.TYPE, (p, ctx) -> with(ctx.server(), s -> s.onSaveChunk(ctx.player(), p)));
 		ServerPlayNetworking.registerGlobalReceiver(Payloads.Close.TYPE, (p, ctx) -> with(ctx.server(), s -> s.onClose(ctx.player(), p)));
 		ServerPlayNetworking.registerGlobalReceiver(Payloads.LinkDataC2S.TYPE, (p, ctx) -> fastRelay(ctx.player().connection, p));
+		ServerPlayNetworking.registerGlobalReceiver(Payloads.NetplayInputC2S.TYPE, (p, ctx) -> fastNetplayInput(ctx.player().connection, p));
+		ServerPlayNetworking.registerGlobalReceiver(Payloads.NetplayHashC2S.TYPE, (p, ctx) -> fastNetplayHash(ctx.player().connection, p));
+		ServerPlayNetworking.registerGlobalReceiver(Payloads.NetplaySnapshotC2S.TYPE, (p, ctx) -> with(ctx.server(), s -> s.onNetplaySnapshot(ctx.player(), p)));
+		ServerPlayNetworking.registerGlobalReceiver(Payloads.NetplayRestartC2S.TYPE, (p, ctx) -> with(ctx.server(), s -> s.onNetplayRestart(ctx.player(), p)));
 		ServerPlayNetworking.registerGlobalReceiver(Payloads.CrtStreamC2S.TYPE, (p, ctx) -> CrtServer.fastStream(ctx.player().connection, p));
 		ServerPlayNetworking.registerGlobalReceiver(Payloads.CrtClose.TYPE, (p, ctx) -> with(ctx.server(), s -> s.crt.onCrtClose(ctx.player(), p.crtId())));
 		ServerPlayNetworking.registerGlobalReceiver(Payloads.CrtNeedKeyframe.TYPE, (p, ctx) -> with(ctx.server(), s -> s.crt.onNeedKeyframe(ctx.player(), p.crtId())));
@@ -203,14 +216,18 @@ public final class GbaServer {
 		}
 		byte[] save = store().read(inserted.pakId());
 		sessions.put(p.getUUID(), inserted.pakId());
+		sessionSha1.put(p.getUUID(), inserted.sha1());
 		assemblers.remove(p.getUUID());
+		LOG.info("link: {} opened session for \"{}\" (pak {})", p.getName().getString(), inserted.title(), inserted.pakId());
 		ServerPlayNetworking.send(p, new Payloads.Open(inserted.pakId(), inserted.sha1(), inserted.title(), save, SaveRules.revision(save)));
 		refreshLink(p.getUUID()); // after Open so the client's session exists when link_state arrives
 	}
 
 	private void closeSessionFor(ServerPlayer p) {
 		crt.endForPlayer(p.getUUID());
+		if (sessions.containsKey(p.getUUID())) LOG.info("link: {} closed session (pak {})", p.getName().getString(), sessions.get(p.getUUID()));
 		sessions.remove(p.getUUID());
+		sessionSha1.remove(p.getUUID());
 		assemblers.remove(p.getUUID());
 		refreshLink(p.getUUID());
 	}
@@ -230,8 +247,6 @@ public final class GbaServer {
 		UUID id = new UUID(ThreadLocalRandom.current().nextLong(), ThreadLocalRandom.current().nextLong());
 		PakData pak = new PakData(id, sha1, title, PakData.sanitizeCode(b.gameCode()));
 		p.setItemInHand(hand, GbaItems.createPak(pak));
-		pendingBurns.put(p.getUUID(), new PendingBurn(id, System.currentTimeMillis()));
-		importAssemblers.remove(p.getUUID());
 		hint(p, "Burned " + title + " onto a Game Pak");
 		LOG.info("{} burned pak {} ({}, {})", p.getName().getString(), id, title, sha1);
 	}
@@ -247,8 +262,10 @@ public final class GbaServer {
 	}
 
 	/** Marks {@code pakId} as the pak this player has open (so its save uploads are accepted). */
-	void openSession(ServerPlayer p, UUID pakId) {
+	void openSession(ServerPlayer p, UUID pakId, String sha1) {
+		LOG.info("link: {} opened session at a CRT (pak {})", p.getName().getString(), pakId);
 		sessions.put(p.getUUID(), pakId);
+		sessionSha1.put(p.getUUID(), sha1);
 		assemblers.remove(p.getUUID());
 	}
 
@@ -298,14 +315,23 @@ public final class GbaServer {
 		}
 	}
 
-	/** Initial save for the pak just burned. Accepted once, only for that pak, only while it has no save. */
+	/**
+	 * Import: replace the save of the pak this player currently has open. The previous save is kept as
+	 * {@code <pakId>.sav.bak1..3}. Answered with a save_ack (new revision, or the unchanged one if refused).
+	 */
 	private void onImportChunk(ServerPlayer p, Payloads.ImportChunk c) {
 		UUID me = p.getUUID();
-		PendingBurn pb = pendingBurns.get(me);
-		if (pb == null) {
-			hint(p, "Import refused: burn a pak first");
+		boolean open = c.pakId().equals(sessions.get(me));
+		if (!open) {
+			importAssemblers.remove(me);
+			if (c.offset() == 0) {
+				hint(p, "Import refused: open this cartridge first");
+				ack(p, c.pakId(), SaveRules.EMPTY_REVISION, false, "Imports are only accepted while you have this cartridge open");
+			}
 			return;
 		}
+		TokenBucket tb = saveLimit.computeIfAbsent(me, k -> new TokenBucket(1024 * 1024, 256 * 1024));
+		if (!tb.take(Math.max(1, c.bytes().length))) { importAssemblers.remove(me); return; }
 		SaveAssembler a = importAssemblers.computeIfAbsent(me, k -> new SaveAssembler());
 		byte[] done;
 		try {
@@ -316,22 +342,20 @@ public final class GbaServer {
 		}
 		if (done == null) return;
 		importAssemblers.remove(me);
-		String why = SaveRules.importRejection(true, System.currentTimeMillis() - pb.at(), store().has(pb.pakId()), done.length);
+		String why = SaveRules.importRejection(true, done.length);
 		if (why != null) {
-			pendingBurns.remove(me);
 			hint(p, "Import refused: " + why);
-			ack(p, pb.pakId(), store().revision(pb.pakId()), false, why);
+			ack(p, c.pakId(), store().revision(c.pakId()), false, why);
 			return;
 		}
-		pendingBurns.remove(me);
 		try {
-			String rev = store().write(pb.pakId(), done);
-			hint(p, "Imported save (" + done.length + " bytes) into the new pak");
-			ack(p, pb.pakId(), rev, true, "");
-			LOG.info("{} imported a {} byte save into pak {}", p.getName().getString(), done.length, pb.pakId());
+			String rev = store().writeImport(c.pakId(), done);
+			assemblers.remove(me); // a half-finished normal upload must not overwrite the import
+			ack(p, c.pakId(), rev, true, "");
+			LOG.info("{} imported a {} byte save into pak {}", p.getName().getString(), done.length, c.pakId());
 		} catch (IOException e) {
-			LOG.warn("Failed to write imported save for pak {}", pb.pakId(), e);
-			hint(p, "Import failed");
+			LOG.warn("Failed to write imported save for pak {}", c.pakId(), e);
+			ack(p, c.pakId(), store().revision(c.pakId()), false, "write failed");
 		}
 	}
 
@@ -369,13 +393,25 @@ public final class GbaServer {
 			case SELF -> { }
 		}
 		if (r == LinkRooms.LinkResult.LINKED) {
+			LOG.info("link: cable joined by {} and {} (room: {})", user.getName().getString(), target.getName().getString(),
+				roomNames(rooms.room(user.getUUID())));
 			target.sendOverlayMessage(Component.literal("Linked with " + user.getName().getString()));
 		}
 		publish(updates);
 		return InteractionResult.SUCCESS;
 	}
 
+	private String roomNames(List<UUID> room) {
+		StringBuilder sb = new StringBuilder();
+		for (UUID u : room) sb.append(sb.length() > 0 ? ", " : "").append(nameOf(u));
+		return room.size() + " players: " + sb;
+	}
+
 	private void unlink(UUID id) {
+		if (rooms.isLinked(id)) {
+			List<UUID> room = rooms.room(id);
+			LOG.info("link: {} left the cable room ({} left in it)", nameOf(id), Math.max(0, room.size() - 1));
+		}
 		List<LinkRooms.Update<UUID>> updates = new ArrayList<>();
 		rooms.remove(id, updates);
 		publish(updates);
@@ -385,7 +421,7 @@ public final class GbaServer {
 		rebuildRoutes();
 		for (LinkRooms.Update<UUID> u : updates) {
 			sendRoom(u.room());
-			for (UUID id : u.released()) sendLinkState(id, EffectiveLink.State.UNPLUGGED, List.of());
+			for (UUID id : u.released()) { np.remove(id); sendLinkState(id, EffectiveLink.State.UNPLUGGED, List.of()); }
 			// cabled but not running a GBA: tell them how to join
 			for (UUID id : u.room()) {
 				if (!sessions.containsKey(id)) hintId(id, "Cable linked - open your GBA to join the link");
@@ -404,13 +440,82 @@ public final class GbaServer {
 		if (!room.isEmpty()) sendRoom(room);
 	}
 
+	private boolean canNetplay(UUID id) {
+		Integer caps = clientCaps.get(id);
+		return caps != null && (caps & Payloads.Hello.CAP_NETPLAY) != 0;
+	}
+
 	private void sendRoom(List<UUID> room) {
-		Map<UUID, EffectiveLink.State> states = EffectiveLink.states(room, this::hasSession);
+		List<UUID> activeMembers = EffectiveLink.active(room, this::hasSession);
+		boolean netplay = EffectiveLink.netplay(activeMembers, sessionSha1::get, this::canNetplay);
+		Map<UUID, EffectiveLink.State> states = EffectiveLink.states(room, this::hasSession, netplay);
 		List<String> names = new ArrayList<>();
-		for (UUID id : EffectiveLink.active(room, this::hasSession)) names.add(nameOf(id));
+		for (UUID id : activeMembers) names.add(nameOf(id));
+		boolean changed = false;
+		for (Map.Entry<UUID, EffectiveLink.State> e : states.entrySet()) {
+			EffectiveLink.State old = lastSent.get(e.getKey());
+			if (!e.getValue().equals(old == null ? EffectiveLink.State.UNPLUGGED : old)) changed = true;
+		}
+		if (changed) {
+			LOG.info("link: effective link of room [{}] is now {}", String.join(", ", room.stream().map(this::nameOf).toList()),
+				names.size() >= 2 ? names.size() + " players (" + String.join(", ", names) + ")" : "unplugged (" + names.size() + " of " + room.size() + " have a GBA open)");
+		}
 		for (Map.Entry<UUID, EffectiveLink.State> e : states.entrySet()) {
 			sendLinkState(e.getKey(), e.getValue(), e.getValue().plugged() ? names : List.of());
 		}
+		updateNetplay(room, activeMembers, netplay, false);
+	}
+
+	/** Starts, restarts or ends the netplay session of a room so that it matches the effective link. */
+	private void updateNetplay(List<UUID> room, List<UUID> active, boolean netplay, boolean forceRestart) {
+		if (!netplay) {
+			for (UUID id : room) if (np.remove(id) != null) LOG.info("link: netplay ended for {}", nameOf(id));
+			return;
+		}
+		NpSession cur = np.get(active.get(0));
+		if (!forceRestart && cur != null && cur.members().equals(active)) return;
+		for (UUID id : room) np.remove(id);
+		NpSession s = new NpSession(++npCounter, List.copyOf(active));
+		long epoch = System.currentTimeMillis() / 1000;
+		int tz = java.time.ZoneId.systemDefault().getRules().getOffset(java.time.Instant.ofEpochSecond(epoch)).getTotalSeconds();
+		List<String> names = new ArrayList<>();
+		for (UUID id : active) names.add(nameOf(id));
+		LOG.info("link: netplay session {} for {} players ({}) - same ROM, input sync", s.id(), active.size(), String.join(", ", names));
+		for (int i = 0; i < active.size(); i++) {
+			UUID id = active.get(i);
+			np.put(id, s);
+			ServerPlayer sp = server.getPlayerList().getPlayer(id);
+			if (sp != null) ServerPlayNetworking.send(sp, new Payloads.NetplayStart(s.id(), i, active.size(), names, epoch, tz, NETPLAY_INITIAL_DELAY));
+		}
+	}
+
+	private static final int NETPLAY_INITIAL_DELAY = 3;
+
+	private final Map<UUID, TokenBucket> snapshotLimit = new HashMap<>();
+
+	private void onNetplaySnapshot(ServerPlayer p, Payloads.NetplaySnapshotC2S c) {
+		NpSession s = np.get(p.getUUID());
+		if (s == null || s.id() != c.sessionId() || c.bytes().length == 0) return;
+		TokenBucket tb = snapshotLimit.computeIfAbsent(p.getUUID(), k -> new TokenBucket(6 * 1024 * 1024, 2 * 1024 * 1024));
+		if (!tb.take(c.bytes().length)) { LOG.warn("netplay: snapshot from {} rate limited", p.getName().getString()); return; }
+		int from = s.members().indexOf(p.getUUID());
+		for (UUID id : s.members()) {
+			if (id.equals(p.getUUID())) continue;
+			ServerPlayer o = server.getPlayerList().getPlayer(id);
+			if (o != null) ServerPlayNetworking.send(o, new Payloads.NetplaySnapshotS2C(c.sessionId(), from, c.gen(), c.frame(), c.offset(), c.total(), c.bytes()));
+		}
+	}
+
+	private void onNetplayRestart(ServerPlayer p, Payloads.NetplayRestartC2S c) {
+		NpSession s = np.get(p.getUUID());
+		if (s == null || s.id() != c.sessionId()) return;
+		long now = System.currentTimeMillis();
+		Long last = npRestartAt.get(s.members().get(0));
+		if (last != null && now - last < 3000) return;
+		npRestartAt.put(s.members().get(0), now);
+		LOG.info("link: {} asked to restart netplay session {}", p.getName().getString(), s.id());
+		List<UUID> room = rooms.room(p.getUUID());
+		updateNetplay(room, s.members(), true, true);
 	}
 
 	private void hintId(UUID id, String msg) {
@@ -431,7 +536,8 @@ public final class GbaServer {
 		lastSent.put(id, st);
 		ServerPlayer sp = server.getPlayerList().getPlayer(id);
 		if (sp != null && ServerPlayNetworking.canSend(sp, Payloads.LinkState.TYPE)) {
-			ServerPlayNetworking.send(sp, new Payloads.LinkState(st.index(), st.count(), names));
+			ServerPlayNetworking.send(sp, new Payloads.LinkState(st.index(), st.count(), names,
+				st.netplay() ? Payloads.LinkState.MODE_NETPLAY : Payloads.LinkState.MODE_CLASSIC));
 		}
 	}
 
@@ -471,6 +577,7 @@ public final class GbaServer {
 		UUID id = listener.getPlayer().getUUID();
 		Route r = routes.get(id);
 		if (r == null) return; // not cabled, or not part of the effective link
+		RELAYED.count(id);
 		TokenBucket tb = fastLimit.computeIfAbsent(id, k -> new TokenBucket(5000, 5000));
 		synchronized (tb) {
 			if (!tb.take(1)) return;
@@ -484,6 +591,39 @@ public final class GbaServer {
 		for (ServerGamePacketListenerImpl to : r.to()) to.send(out);
 	}
 
+	private static void relay(Route r, net.minecraft.network.protocol.Packet<?> out) {
+		if (RELAY_DELAY_MS > 0) {
+			DELAYER.schedule(() -> { for (ServerGamePacketListenerImpl to : r.to()) to.send(out); }, RELAY_DELAY_MS, java.util.concurrent.TimeUnit.MILLISECONDS);
+			return;
+		}
+		for (ServerGamePacketListenerImpl to : r.to()) to.send(out);
+	}
+
+	private static Route netplayRoute(ServerGamePacketListenerImpl listener) {
+		UUID id = listener.getPlayer().getUUID();
+		Route r = routes.get(id);
+		if (r == null) return null;
+		RELAYED.count(id);
+		TokenBucket tb = fastLimit.computeIfAbsent(id, k -> new TokenBucket(5000, 5000));
+		synchronized (tb) {
+			if (!tb.take(1)) return null;
+		}
+		return r;
+	}
+
+	/** Netty thread: relay a player's controller records to the other players of its link (no tick wait). */
+	public static void fastNetplayInput(ServerGamePacketListenerImpl listener, Payloads.NetplayInputC2S d) {
+		Route r = netplayRoute(listener);
+		if (r == null) return;
+		relay(r, ServerPlayNetworking.createClientboundPacket(new Payloads.NetplayInputS2C(d.sessionId(), r.from(), d.firstFrame(), d.recs(), d.sendMs(), d.echo())));
+	}
+
+	public static void fastNetplayHash(ServerGamePacketListenerImpl listener, Payloads.NetplayHashC2S d) {
+		Route r = netplayRoute(listener);
+		if (r == null) return;
+		relay(r, ServerPlayNetworking.createClientboundPacket(new Payloads.NetplayHashS2C(d.sessionId(), r.from(), d.gen(), d.frame(), d.hash())));
+	}
+
 	private static final long RELAY_DELAY_MS = Long.getLong("gbalink.relaydelay", 0L);
 	private static final java.util.concurrent.ScheduledExecutorService DELAYER = RELAY_DELAY_MS > 0
 		? java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> { Thread t = new Thread(r, "gbalink-relay-delay"); t.setDaemon(true); return t; })
@@ -492,15 +632,20 @@ public final class GbaServer {
 	private void onDisconnect(ServerPlayer p) {
 		UUID id = p.getUUID();
 		crt.onDisconnect(id);
+		if (sessions.containsKey(id)) LOG.info("link: {} disconnected with a session open (pak {})", p.getName().getString(), sessions.get(id));
 		sessions.remove(id); // unlink() below republishes the room (and routes) without this player
+		sessionSha1.remove(id);
+		np.remove(id);
+		snapshotLimit.remove(id);
+		clientCaps.remove(id);
 		assemblers.remove(id);
 		lastSent.remove(id);
 		saveLimit.remove(id);
 		fastLimit.remove(id);
+		RELAYED.forget(id);
 		burnLimit.remove(id);
 		lastSaveWrite.remove(id);
 		importAssemblers.remove(id);
-		pendingBurns.remove(id);
 		clientProtocol.remove(id);
 		cableCooldown.remove(id);
 		unlink(id);
@@ -510,6 +655,14 @@ public final class GbaServer {
 		tickCounter++;
 		crt.tick();
 		if (tickCounter % 20 != 0) return;
+		long nowMs = System.currentTimeMillis();
+		for (List<UUID> room : rooms.allRooms()) {
+			RelayCounters.Rate rate = RELAYED.poll(room, nowMs);
+			if (rate != null) {
+				LOG.info("link: room [{}] relayed {} messages in {}s ({}/s)", String.join(", ", room.stream().map(this::nameOf).toList()),
+					rate.messages(), Math.round(rate.seconds()), Math.round(rate.perSecond()));
+			}
+		}
 		for (List<UUID> room : rooms.allRooms()) {
 			for (UUID id : room) {
 				ServerPlayer me = server.getPlayerList().getPlayer(id);

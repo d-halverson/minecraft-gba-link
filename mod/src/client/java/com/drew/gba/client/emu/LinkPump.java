@@ -18,6 +18,7 @@ public final class LinkPump {
 	private final Runnable onTimeout;
 	private final LinkedBlockingQueue<Object[]> incoming = new LinkedBlockingQueue<>(4096);
 	private GbaCore core;
+	private final LinkStats stats;
 
 	private volatile int index, count;
 	private volatile List<String> names;
@@ -32,7 +33,10 @@ public final class LinkPump {
 		this.index = index;
 		this.count = count;
 		this.names = names;
+		this.stats = new LinkStats(nanos.getAsLong());
 	}
+
+	public LinkStats stats() { return stats; }
 
 	public void bind(GbaCore core) { this.core = core; }
 
@@ -53,6 +57,7 @@ public final class LinkPump {
 		count = cnt;
 		names = nms;
 		timedOut = false;
+		stats.clear(nanos.getAsLong());
 		core.linkConfigure(idx, cnt);
 		if (cnt < 2) incoming.clear();
 	}
@@ -91,13 +96,17 @@ public final class LinkPump {
 
 	private void deliver(Object[] m) {
 		if (count < 2) return;
+		stats.onIncoming((byte[]) m[1]);
 		core.linkDeliver((Integer) m[0], (byte[]) m[1]);
 	}
 
 	private void pumpOutgoing() {
 		byte[] m;
 		int guard = 0;
-		while ((m = core.linkPollOutgoing()) != null && guard++ < 256) sender.accept(m);
+		while ((m = core.linkPollOutgoing()) != null && guard++ < 256) {
+			stats.onOutgoing(m, nanos.getAsLong());
+			sender.accept(m);
+		}
 	}
 
 	/**
@@ -112,6 +121,7 @@ public final class LinkPump {
 			pumpOutgoing();
 			if (r == GbaNative.RUN_FRAME_DONE) {
 				waiting = false;
+				stats.recordFrame();
 				return r;
 			}
 			if (r == GbaNative.RUN_ERROR) return r;
@@ -119,6 +129,7 @@ public final class LinkPump {
 			if (waitStart == 0) waitStart = nanos.getAsLong();
 			waiting = true;
 			boolean heard = false;
+			long blockedFrom = nanos.getAsLong();
 			try {
 				Object[] m = incoming.poll(2, TimeUnit.MILLISECONDS);
 				if (m != null) { deliver(m); heard = true; }
@@ -126,6 +137,7 @@ public final class LinkPump {
 				Thread.currentThread().interrupt();
 				return GbaNative.RUN_LINK_WAIT;
 			}
+			stats.recordBlocked(nanos.getAsLong() - blockedFrom);
 			if (deliverIncoming() > 0 || heard) waitStart = nanos.getAsLong(); // partner is alive: restart the timeout
 			service.run();
 			if (nanos.getAsLong() - waitStart > timeoutNanos) {

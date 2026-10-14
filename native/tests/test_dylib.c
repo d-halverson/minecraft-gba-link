@@ -27,7 +27,7 @@ int main(int argc, char** argv) {
 		"gba_api_version", "gba_create", "gba_destroy", "gba_load_rom", "gba_reset", "gba_rom_info",
 		"gba_set_keys", "gba_run_frame", "gba_framebuffer", "gba_read_audio", "gba_save_size",
 		"gba_get_save", "gba_load_save", "gba_save_dirty", "gba_state_size", "gba_save_state",
-		"gba_load_state", "gba_link_configure", "gba_link_poll_outgoing", "gba_link_deliver" };
+		"gba_load_state", "gba_link_configure", "gba_link_poll_outgoing", "gba_link_deliver", "gba_set_rtc" };
 	for (size_t i = 0; i < sizeof(names) / sizeof(*names); ++i) {
 		CHECK(SYM(h, names[i]) != NULL, "missing export %s", names[i]);
 	}
@@ -42,7 +42,7 @@ int main(int argc, char** argv) {
 	int (*run)(void*) = (int (*)(void*)) SYM(h, "gba_run_frame");
 	const uint8_t* (*fbf)(void*) = (const uint8_t* (*)(void*)) SYM(h, "gba_framebuffer");
 	size_t (*audio)(void*, int16_t*, size_t) = (size_t (*)(void*, int16_t*, size_t)) SYM(h, "gba_read_audio");
-	CHECK(api() == 1, "api version %u", api());
+	CHECK(api() == 2, "api version %u", api());
 	void* c = create();
 	CHECK(c != NULL, "create");
 	CHECK(load(c, argv[2]) == 0, "load rom");

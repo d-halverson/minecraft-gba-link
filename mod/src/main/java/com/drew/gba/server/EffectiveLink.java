@@ -13,8 +13,10 @@ import java.util.function.Predicate;
 public final class EffectiveLink {
 	private EffectiveLink() {}
 
-	public record State(int index, int count) {
-		public static final State UNPLUGGED = new State(0, 0);
+	/** {@code netplay}: the members run input-sync netplay (all paks have the same ROM) instead of the classic link. */
+	public record State(int index, int count, boolean netplay) {
+		public State(int index, int count) { this(index, count, false); }
+		public static final State UNPLUGGED = new State(0, 0, false);
 		public boolean plugged() { return count >= 2; }
 	}
 
@@ -27,13 +29,33 @@ public final class EffectiveLink {
 
 	/** Effective state of every room member (inactive members and small groups are UNPLUGGED). */
 	public static <K> Map<K, State> states(List<K> room, Predicate<K> open) {
+		return states(room, open, false);
+	}
+
+	public static <K> Map<K, State> states(List<K> room, Predicate<K> open, boolean netplay) {
 		List<K> a = active(room, open);
 		Map<K, State> m = new LinkedHashMap<>();
 		for (K k : room) {
 			int i = a.indexOf(k);
-			m.put(k, i < 0 ? State.UNPLUGGED : new State(i, a.size()));
+			m.put(k, i < 0 ? State.UNPLUGGED : new State(i, a.size(), netplay));
 		}
 		return m;
+	}
+
+	/**
+	 * Netplay needs at least two active players, every client able to run it, and the same ROM (SHA-1) in every pak.
+	 * Anything else uses the classic lockstep link ("different games - slow mode").
+	 */
+	public static <K> boolean netplay(List<K> active, java.util.function.Function<K, String> sha1, Predicate<K> capable) {
+		if (active.size() < 2) return false;
+		String first = null;
+		for (K k : active) {
+			String s = sha1.apply(k);
+			if (s == null || s.isEmpty() || !capable.test(k)) return false;
+			if (first == null) first = s;
+			else if (!first.equalsIgnoreCase(s)) return false;
+		}
+		return true;
 	}
 
 	/** Effective index of a member, or -1 if it is not part of an effective link. */

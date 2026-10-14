@@ -33,6 +33,7 @@ public final class GbaScreen extends Screen {
 	private int lastSeq = -1;
 	private final byte[] frameCopy = new byte[W * H * 4];
 	private boolean closed;
+	private boolean childOpen;
 
 	/** Live game. */
 	public GbaScreen(EmulatorSession session) {
@@ -61,16 +62,27 @@ public final class GbaScreen extends Screen {
 		}
 		int by = height - 24;
 		int cx = width / 2;
-		int bw = Math.min(92, (width - 20 - 3 * 4) / 4), gap = 4;
-		int x0 = cx - (4 * bw + 3 * gap) / 2;
-		addRenderableWidget(Button.builder(Component.literal("Save State (F5)"), b -> session.saveStateAsync())
+		int bw = Math.min(92, (width - 20 - 4 * 4) / 5), gap = 4;
+		int x0 = cx - (5 * bw + 4 * gap) / 2;
+		addRenderableWidget(Button.builder(Component.literal("Save (F5)"), b -> session.saveStateAsync())
 			.bounds(x0, by, bw, 18).build());
-		addRenderableWidget(Button.builder(Component.literal("Load State (F8)"), b -> session.loadStateAsync())
+		addRenderableWidget(Button.builder(Component.literal("Load (F8)"), b -> session.loadStateAsync())
 			.bounds(x0 + (bw + gap), by, bw, 18).build());
 		addRenderableWidget(Button.builder(Component.literal("Export .sav"), b -> session.exportSaveAsync())
 			.bounds(x0 + 2 * (bw + gap), by, bw, 18).build());
-		addRenderableWidget(Button.builder(Component.literal("Close (Esc)"), b -> onClose())
+		addRenderableWidget(Button.builder(Component.literal("Import .sav"), b -> openImport())
 			.bounds(x0 + 3 * (bw + gap), by, bw, 18).build());
+		addRenderableWidget(Button.builder(Component.literal("Close (Esc)"), b -> onClose())
+			.bounds(x0 + 4 * (bw + gap), by, bw, 18).build());
+	}
+
+	/** Import flow: picker -> confirmation -> the session restarts from the imported save. The game keeps running behind. */
+	private void openImport() {
+		if (session == null || session.isFinished()) return;
+		session.releaseAll();
+		session.turbo = false;
+		childOpen = true; // the child screens return here; this screen must not suspend the game in removed()
+		ImportConfirmScreen.begin(this, session);
 	}
 
 	/** Slide the power switch: save, delete the suspend state, close. */
@@ -143,7 +155,7 @@ public final class GbaScreen extends Screen {
 		// Layout. The wings hold the controls: margin | control cluster | margin, measured from the screen well.
 		final int wellPad = 8, margin = 8, clusterW = 34, wing = margin + clusterW + margin;
 		int padSide = wellPad + wing, padTop = 26, padBottom = 34;
-		int footerTop = height - 24 - 14; // body (plus the status line below it) must end above the buttons
+		int footerTop = height - 24 - 24; // body plus the status and stats lines below it must end above the buttons
 		int availW = width - 2 * padSide - 8, availH = footerTop - padBottom - padTop - 2;
 		int dw, dh;
 		int sInt = Math.min(availW / W, availH / H);
@@ -198,6 +210,8 @@ public final class GbaScreen extends Screen {
 		} else {
 			String status = session.error() != null ? session.error() : session.linkStatus();
 			g.centeredText(font, status, width / 2, bodyB + 4, session.error() != null ? 0xFFFF8888 : 0xFFD8CCFF);
+			String stats = session.error() != null ? "" : session.linkStatsLine();
+			if (!stats.isEmpty()) g.centeredText(font, stats, width / 2, Math.min(bodyB + 15, height - 34), 0xFF9C92C4);
 			if (!session.audioAvailable() && lastSeq > 0 && lastSeq < 120) {
 				g.centeredText(font, "No audio device available", width / 2, Math.max(2, bodyT - 12), 0xFFFFAAAA);
 			}
@@ -268,6 +282,7 @@ public final class GbaScreen extends Screen {
 
 	@Override
 	public void removed() {
+		if (childOpen) { childOpen = false; return; } // only switching to the import screens
 		if (closed) return;
 		closed = true;
 		if (session != null) {

@@ -135,6 +135,12 @@ public final class GbaCore implements AutoCloseable {
 		} catch (Throwable t) { throw wrap(t); }
 	}
 
+	/** Virtual RTC (API 2): mode GbaNative.RTC_VIRTUAL reads {@code epochSeconds} now and advances with emulated time. False if unsupported. */
+	public boolean setRtc(long epochSeconds, int mode) {
+		if (n.setRtc == null) return mode == GbaNative.RTC_WALL;
+		try { return (int) n.setRtc.invokeExact(core, epochSeconds, mode) == 0; } catch (Throwable t) { throw wrap(t); }
+	}
+
 	public void linkConfigure(int index, int count) {
 		try { n.linkConfigure.invokeExact(core, index, count); } catch (Throwable t) { throw wrap(t); }
 	}

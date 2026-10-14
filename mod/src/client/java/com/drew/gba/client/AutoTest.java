@@ -71,7 +71,7 @@ public final class AutoTest {
 		this.dir = mc.gameDirectory.toPath().resolve("autotest");
 		String sp = System.getProperty("gbalink.autotest.sync");
 		this.sync = sp == null ? dir.resolve("sync") : Path.of(sp);
-		this.romName = System.getProperty("gbalink.autotest.rom", mode.startsWith("crt") && !mode.equals("crtmodel") ? "shades.gba" : mode.equals("qol") ? "counter.gba" : mode.equals("solo") ? "sram.gba" : "link_n32_" + (mode.equals("A") ? "master" : "slave") + ".gba");
+		this.romName = System.getProperty("gbalink.autotest.rom", mode.startsWith("crt") && !mode.equals("crtmodel") ? "shades.gba" : mode.equals("qol") ? "counter.gba" : mode.equals("solo") ? "sram.gba" : mode.startsWith("np") || mode.startsWith("nc") ? "link_pokesim.gba" : "link_n32_" + (mode.equals("A") ? "master" : "slave") + ".gba");
 	}
 
 	public static void start() {
@@ -180,6 +180,7 @@ public final class AutoTest {
 	}
 
 	private void copyEvidence(Path src, String dstName) {
+		if (src.getFileName().toString().startsWith("netplay_")) dstName = src.getFileName().toString();
 		try {
 			Path d = sync.resolveSibling("evidence");
 			Files.createDirectories(d);
@@ -376,6 +377,7 @@ public final class AutoTest {
 			else if (mode.equals("crtB") || mode.equals("crtC")) crtViewer();
 			else if (mode.equals("qol")) qol();
 			else if (mode.equals("solo")) solo();
+			else if (mode.startsWith("np") || mode.startsWith("nc")) netplayScenario();
 			else link();
 			log("SCENARIO COMPLETE: " + mode);
 		} catch (Fail f) {
@@ -531,6 +533,9 @@ public final class AutoTest {
 		if (System.getProperty("gbalink.crt.third") != null) awaitSignal("C.ready", 240000);
 		// play
 		tp(tx, gy, tz - 3.6, 0f, 8f);
+		final boolean f1First = System.getProperty("gbalink.crt.f1") != null;
+		if (f1First) hideGui(true); // the player already had F1 on before sitting down at the TV
+		boolean hudBefore = main(() -> mc.gui.hud.isHidden());
 		interactCrt(false);
 		waitFor("CRT screen with a live session", 20000, () -> mc.gui.screen() instanceof CrtScreen && GbaLinkClient.currentSession() != null);
 		waitFor("first frame", 10000, () -> GbaLinkClient.currentSession().frames.seq() > 5);
@@ -538,10 +543,16 @@ public final class AutoTest {
 		sleep(1500);
 		float[] rot = main(() -> new float[] {mc.player.getYRot(), mc.player.getXRot()});
 		log("camera after turning to the TV: yaw=" + rot[0] + " pitch=" + rot[1]);
-		hideGui(false);
 		clearClutter();
+		check(main(() -> mc.gui.hud.isHidden()), "HUD (crosshair, hand, hotbar) is hidden while playing on the CRT");
 		shot("crt_A_playing");
+		copyEvidence(mc.gameDirectory.toPath().resolve("screenshots").resolve("crt_A_playing.png"), f1First ? "v04qol_crt_playing_f1.png" : "v04qol_crt_playing.png");
 		CrtScreen cs = main(() -> mc.gui.screen() instanceof CrtScreen c ? c : null);
+		main(() -> cs.keyPressed(new KeyEvent(InputConstants.KEY_E, 69, 0)));
+		sleep(800);
+		String et = main(() -> GbaLinkClient.currentSession().toast());
+		check(et.startsWith("Exported") || et.contains("no save yet"), "E on the CRT triggers the export ('" + et + "')");
+		shot("crt_A_export_toast");
 		main(() -> cs.keyPressed(new KeyEvent(InputConstants.KEY_RIGHT, 262, 0)));
 		sleep(500);
 		main(() -> cs.keyReleased(new KeyEvent(InputConstants.KEY_RIGHT, 262, 0)));
@@ -551,6 +562,7 @@ public final class AutoTest {
 		long up = main(() -> GbaLinkClient.currentSession().streamer().bytesSent.get());
 		log("streamer uploaded " + up + " bytes in total, video packets " + main(() -> GbaLinkClient.currentSession().streamer().videoPackets.get()));
 		shot("crt_A_playing2");
+		copyEvidence(mc.gameDirectory.toPath().resolve("screenshots").resolve("crt_A_playing2.png"), f1First ? "v04qol_crt_hint_f1.png" : "v04qol_crt_hint.png");
 		signal("A.done");
 		sleep(1500);
 		// leave with Esc: suspends like closing the GBA
@@ -560,6 +572,8 @@ public final class AutoTest {
 		waitFor("session finished", 8000, ses::isFinished);
 		sleep(1500);
 		shot("crt_A_after_leaving");
+		copyEvidence(mc.gameDirectory.toPath().resolve("screenshots").resolve("crt_A_after_leaving.png"), f1First ? "v04qol_crt_after_f1.png" : "v04qol_crt_after.png");
+		check(main(() -> mc.gui.hud.isHidden()) == hudBefore, "HUD state restored exactly after leaving the CRT (was hidden=" + hudBefore + ")");
 		if (reopen) { log("reopen scenario done (persistence verified); leaving the TV in place"); return; }
 		if (System.getProperty("gbalink.crt.keep") != null) { log("keeping the TV in the world (persistence test)"); return; }
 		// punch it: the CRT item comes back with the pak
@@ -871,7 +885,7 @@ public final class AutoTest {
 		check(GbaLinkClient.currentSession().resumed, "unchanged save: resumes again");
 		closeGba();
 
-		// 8. import: burn a second pak with an existing save
+		// 8. import .sav in the emulator: replaces this cartridge's save, backs up the old one, cold-boots from the new one
 		byte[] imp = new byte[32768];
 		for (int i = 0; i < imp.length; i++) imp[i] = (byte) (i * 7 + 3);
 		imp[0] = (byte) 0xDE; imp[1] = (byte) 0xAD; imp[2] = (byte) 0xBE; imp[3] = (byte) 0xEF;
@@ -880,51 +894,54 @@ public final class AutoTest {
 			Files.write(gbalinkDir().resolve("imports").resolve("my game.sav"), imp);
 			Files.write(gbalinkDir().resolve("imports").resolve("garbage.sav"), new byte[1234]);
 		} catch (IOException e) { fail("write import file " + e); }
-		giveAndWait(GbaItems.BLANK_PAK);
-		int blank = slotOf(GbaItems.BLANK_PAK);
-		select(blank);
-		use();
-		waitFor("burn screen", 5000, () -> mc.gui.screen() instanceof RomPickerScreen);
-		sleep(1000);
-		qolShot("6_picker");
-		clickWidget("Burn with existing save");
-		waitFor("save picker", 5000, () -> mc.gui.screen() instanceof com.drew.gba.client.ui.SavePickerScreen);
+		openGba();
+		waitCounter(120);
+		byte[] before = readQuiet(serverSave);
+		check(before.length > 0 && !Arrays.equals(before, imp), "the cartridge has its own save before the import");
+		clickGbaButton("Import .sav");
+		waitFor("import picker", 5000, () -> mc.gui.screen() instanceof com.drew.gba.client.ui.SavePickerScreen);
+		check(!GbaLinkClient.currentSession().isFinished(), "opening the picker does not suspend the game");
 		sleep(800);
-		qolShot("7_save_picker");
+		qolShot("6_import_picker");
+		copyEvidence(mc.gameDirectory.toPath().resolve("screenshots").resolve("qol_6_import_picker.png"), "v04qol_import_picker.png");
 		Boolean garbageActive = main(() -> {
 			for (var c : mc.gui.screen().children()) if (c instanceof Button b && b.getMessage().getString().startsWith("garbage.sav")) return b.active;
 			return null;
 		});
 		check(Boolean.FALSE.equals(garbageActive), "a garbage-sized .sav is listed but cannot be picked");
 		clickWidget("my game.sav");
-		waitFor("back on the burn screen", 5000, () -> mc.gui.screen() instanceof RomPickerScreen);
+		waitFor("confirm screen", 5000, () -> mc.gui.screen() instanceof com.drew.gba.client.ui.ImportConfirmScreen);
 		sleep(600);
-		clickWidget("counter");
-		waitFor("second pak burned", 8000, () -> GbaItems.is(mc.player.getInventory().getItem(blank), GbaItems.PAK));
-		PakData pd2 = main(() -> GbaItems.pakOf(mc.player.getInventory().getItem(blank)));
-		Path save2 = savePath(pd2);
-		waitFor("imported save on the server", 8000, () -> Files.isRegularFile(save2));
-		check(Arrays.equals(readQuiet(save2), imp), "server stored exactly the imported save as the new pak's first save");
-		waitFor("local copy of the import", 5000, () -> Files.isRegularFile(gbalinkDir().resolve("saves").resolve(pd2.pakId() + ".sav")));
-		// a second import into the same pak must be refused: replay through the public path is not possible from the UI,
-		// so this is covered by the unit tests (SaveRules.importRejection)
-		// insert the new pak and boot it: the cartridge must see the imported bytes
-		// (pak 1 is still in the GBA: eject it first)
-		int gbaSlot = slotOf(GbaItems.GBA);
-		select(gbaSlot);
-		sneak(true);
-		use();
-		sneak(false);
-		waitFor("pak 1 ejected", 5000, () -> GbaItems.insertedPak(mc.player.getInventory().getItem(gbaSlot)) == null);
-		PakData pd2b = insertPakById(pd2);
-		openGba();
-		EmulatorSession s5 = GbaLinkClient.currentSession();
-		check(!s5.resumed, "imported pak cold-boots");
-		sleep(500);
-		long seen = wordAt(4);
-		check(seen == 0xEFBEADDEL, String.format("game started with the imported save (cart read %08x)", seen));
-		check(s5.toast().contains("Powered on"), "boot toast on the second pak");
+		qolShot("7_import_confirm");
+		copyEvidence(mc.gameDirectory.toPath().resolve("screenshots").resolve("qol_7_import_confirm.png"), "v04qol_import_confirm.png");
+		EmulatorSession pre = GbaLinkClient.currentSession();
+		clickWidget("Import");
+		waitFor("back on the GBA screen", 5000, () -> mc.gui.screen() instanceof GbaScreen);
+		waitFor("imported toast", 8000, () -> pre.toast().startsWith("Imported"));
+		sleep(1200);
+		check(GbaLinkClient.currentSession() == pre, "same session continues (core restarted inside it)");
+		check(Arrays.equals(readQuiet(serverSave), imp), "server stores exactly the imported save");
+		check(Arrays.equals(readQuiet(serverSave.resolveSibling(serverSave.getFileName() + ".bak1")), before), "server kept the previous save as .bak1");
+		check(Arrays.equals(readQuiet(mirror), imp), "local mirror holds the imported save");
+		check(!Files.exists(suspend), "suspend state was discarded");
+		check(!pre.resumed, "import cold-boots");
+		check(wordAt(4) == 0xEFBEADDEL, String.format("cartridge sees the imported save (read %08x)", wordAt(4)));
+		check(counter() < 400, "game restarted (counter " + counter() + ")");
+		long backups;
+		try (var st = Files.list(gbalinkDir().resolve("exports"))) { backups = st.filter(p -> p.toString().endsWith("-before-import.sav")).count(); } catch (IOException e) { backups = -1; }
+		check(backups >= 1, "current save was exported to exports/ before importing (" + backups + ")");
+		qolShot("8_import_done");
+		copyEvidence(mc.gameDirectory.toPath().resolve("screenshots").resolve("qol_8_import_done.png"), "v04qol_import_done.png");
+		// the server refuses an import for a pak this player does not have open (protocol-level check, no UI for this)
 		closeGba();
+		sleep(500);
+		byte[] afterClose = readQuiet(serverSave);
+		java.util.UUID bogus = java.util.UUID.randomUUID();
+		main(() -> ClientPlayNetworking.send(new Payloads.ImportChunk(bogus, 0, 32768, Arrays.copyOf(imp, 20000))));
+		main(() -> ClientPlayNetworking.send(new Payloads.ImportChunk(bogus, 20000, 32768, Arrays.copyOfRange(imp, 20000, 32768))));
+		main(() -> ClientPlayNetworking.send(new Payloads.ImportChunk(pd.pakId(), 0, 12345, new byte[12345]))); // pak not open any more
+		sleep(1000);
+		check(Arrays.equals(readQuiet(serverSave), afterClose), "imports without an open session are ignored");
 	}
 
 	private void clickGbaButton(String label) {
@@ -972,6 +989,134 @@ public final class AutoTest {
 
 	private static long word(byte[] st, int off) {
 		return ByteBuffer.wrap(st).order(ByteOrder.LITTLE_ENDIAN).getInt(WRAM + off) & 0xFFFFFFFFL;
+	}
+
+
+	// ------------------------------------------------------------------ netplay (np*: same ROM; nc*: different ROMs = classic)
+
+	/** Two clients, pokesim ROM, cabled. npA/npB use the same ROM (netplay); ncA/ncB use different ROMs (classic link). */
+	private void netplayScenario() {
+		boolean a = mode.endsWith("A");
+		boolean classic = mode.startsWith("nc");
+		String other = mode.substring(0, 2) + (a ? "B" : "A");
+		String tag = classic ? "classic" : "netplay";
+		boolean crt = !a && System.getProperty("gbalink.autotest.crtB") != null; // B plays on a CRT TV
+		if (crt) tag += "_crt";
+		double[] tv = new double[3];
+		if (crt) giveAndWait(GbaItems.CRT); else giveAndWait(GbaItems.GBA);
+		giveAndWait(GbaItems.BLANK_PAK);
+		if (a) giveAndWait(GbaItems.CABLE);
+		burn();
+		if (crt) placeCrtAndInsert(tv); else insert();
+		signal(mode + ".ready");
+		awaitSignal(other + ".ready", 180000);
+		if (a) {
+			command("tp @s TestB");
+			sleep(1500);
+			select(slotOf(GbaItems.CABLE));
+			AbstractClientPlayer target = main(() -> {
+				for (AbstractClientPlayer p : mc.level.players()) if (p != mc.player && p.getGameProfile().name().equals("TestB")) return p;
+				return null;
+			});
+			if (target == null) fail("TestB not visible to TestA");
+			main(() -> mc.gameMode.interact(mc.player, target, new EntityHitResult(target), InteractionHand.MAIN_HAND));
+			log("used link cable on TestB");
+			sleep(800);
+			signal(mode.substring(0, 2) + "A.cabled");
+		}
+		awaitSignal(mode.substring(0, 2) + "A.cabled", 60000);
+		sleep(500);
+		if (crt) playCrt(tv); else openGba();
+		EmulatorSession s = GbaLinkClient.currentSession();
+		if (classic) waitFor("classic link up", 30000, () -> s.linkStatus().contains("different games"));
+		else waitFor("netplay running", 40000, () -> s.netplay().running());
+		log("link up: " + s.linkStatus());
+		signal(mode + ".open1");
+		awaitSignal(other + ".open1", 60000);
+		sleep(8000); // settle: delay adaptation, ROM warm-up
+		long[] c0 = counters(s);
+		int f0 = s.frames.seq();
+		long t0 = System.nanoTime();
+		var eng = s.netplay().engine();
+		long stalls0 = eng == null ? 0 : eng.totalStalls;
+		sleep(6000);
+		long[] c1 = counters(s);
+		double secs = (System.nanoTime() - t0) / 1e9;
+		double fps = (s.frames.seq() - f0) / secs;
+		String extra = "";
+		if (eng != null) {
+			extra = String.format(" stalls=%d delay=%df ping=%.0fms desyncs=%d resyncs=%d", eng.totalStalls - stalls0, eng.delay(), eng.pingMs(), eng.desyncs, eng.resyncs);
+		}
+		log(String.format("%s measurement: %.1f frames/s, exchanges good=%d bad=%d missed=%d (over %.1f s) | status: %s | stats: %s%s",
+			tag, fps, c1[0] - c0[0], c1[1] - c0[1], c1[2] - c0[2], secs, s.linkStatus(), s.linkStatsLine(), extra));
+		log("throughput " + tag + ": " + String.format("%.1f", fps) + " fps");
+		shot("netplay_" + tag + "_" + mode);
+		signal(mode + ".measured");
+		awaitSignal(other + ".measured", 60000);
+		if (!classic) {
+			// the link must also be seamless when one side leaves: B closes, A continues alone
+			if (!a) {
+				sleep(500);
+				if (crt) {
+					main(() -> mc.gui.screen().onClose());
+					waitFor("CRT screen closed", 5000, () -> mc.gui.screen() == null);
+					waitFor("session finished", 8000, s::isFinished);
+				} else closeGba();
+				signal("npB.closed");
+				return;
+			}
+			awaitSignal("npB.closed", 60000);
+			int f1 = s.frames.seq();
+			waitFor("A back to standalone", 15000, () -> !s.netplay().active());
+			sleep(1500);
+			check(s.frames.seq() - f1 > 30, "A keeps emulating alone after B left");
+			long[] c2 = counters(s);
+			log("after B left: status=" + s.linkStatus() + " counters good=" + c2[0] + " bad=" + c2[1] + " missed=" + c2[2]);
+			shot("netplay_" + mode + "_alone");
+		}
+		sleep(500);
+		if (crt) {
+			main(() -> { if (mc.gui.screen() != null) mc.gui.screen().onClose(); });
+			sleep(1000);
+		} else if (gbaScreen() != null) closeGba();
+	}
+
+	/** Place the CRT item on the floor 6 blocks east, insert the burned pak (sneak-use with the pak in the off hand). */
+	private void placeCrtAndInsert(double[] tv) {
+		BlockPos at = main(() -> mc.player.blockPosition());
+		double gy = at.getY();
+		command("time set noon");
+		command("kill @e[type=!minecraft:player]");
+		tv[0] = at.getX() + 6.0; tv[1] = gy; tv[2] = at.getZ() + 0.5;
+		tp(tv[0] + 0.5, gy, tv[2] - 3.2, 0f, 8f);
+		select(slotOf(GbaItems.CRT));
+		BlockPos floor = new BlockPos(at.getX() + 6, at.getY() - 1, at.getZ());
+		main(() -> mc.gameMode.useItemOn(mc.player, InteractionHand.MAIN_HAND,
+			new net.minecraft.world.phys.BlockHitResult(new net.minecraft.world.phys.Vec3(floor.getX() + 0.5, gy, floor.getZ() + 0.5), Direction.UP, floor, false)));
+		sleep(1500);
+		waitFor("CRT entity", 5000, () -> findCrtEntityNow() != null);
+		select(slotOf(GbaItems.PAK));
+		main(() -> mc.player.connection.send(new ServerboundPlayerActionPacket(
+			ServerboundPlayerActionPacket.Action.SWAP_ITEM_WITH_OFFHAND, BlockPos.ZERO, Direction.DOWN, 0)));
+		waitFor("pak in off hand", 5000, () -> GbaItems.is(mc.player.getItemInHand(InteractionHand.OFF_HAND), GbaItems.PAK));
+		interactCrt(true);
+		waitFor("pak inserted (off hand empty)", 5000, () -> mc.player.getItemInHand(InteractionHand.OFF_HAND).isEmpty());
+		check(true, "pak inserted into the CRT");
+	}
+
+	private void playCrt(double[] tv) {
+		tp(tv[0], tv[1], tv[2] - 3.6, 0f, 8f);
+		interactCrt(false);
+		waitFor("CRT screen with a live session", 20000, () -> mc.gui.screen() instanceof CrtScreen && GbaLinkClient.currentSession() != null);
+		waitFor("first frame", 10000, () -> GbaLinkClient.currentSession().frames.seq() > 5);
+		sleep(1500);
+		clearClutter();
+		check(true, "CRT play mode open and emulating");
+	}
+
+	private long[] counters(EmulatorSession s) {
+		byte[] st = s.debugState().orTimeout(5, TimeUnit.SECONDS).join();
+		return new long[] {word(st, 0), word(st, 4), word(st, 8)};
 	}
 
 	private void link() {

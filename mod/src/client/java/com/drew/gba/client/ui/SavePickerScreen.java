@@ -16,7 +16,7 @@ import java.util.Locale;
 import java.util.function.BiConsumer;
 import java.util.stream.Stream;
 
-/** Lists the .sav files in {@code gbalink/imports/}; picking a valid one hands its bytes back to the burn screen. */
+/** Lists the .sav files in {@code gbalink/imports/}; picking a valid one hands (name, bytes) to the caller, which shows the next screen. */
 public final class SavePickerScreen extends Screen {
 	private record Entry(Path path, long size, String problem) {}
 
@@ -28,7 +28,7 @@ public final class SavePickerScreen extends Screen {
 	private String error = "";
 
 	public SavePickerScreen(Screen parent, BiConsumer<String, byte[]> onPick) {
-		super(Component.literal("Pick a save file to import"));
+		super(Component.literal("Import a save file"));
 		this.parent = parent;
 		this.onPick = onPick;
 	}
@@ -74,10 +74,10 @@ public final class SavePickerScreen extends Screen {
 		Button next = addRenderableWidget(Button.builder(Component.literal(">"), b -> { page++; rebuild(); }).bounds(x + w - 30, by, 30, 20).build());
 		prev.active = page > 0;
 		next.active = page < pages - 1;
-		addRenderableWidget(Button.builder(Component.literal("Open folder"), b -> RomLibrary.openFolder(RomLibrary.importsDir()))
-			.bounds(x + 34, by, w / 2 - 38, 20).build());
+		addRenderableWidget(Button.builder(Component.literal("Open imports folder"), b -> RomLibrary.openFolder(RomLibrary.importsDir()))
+			.bounds(x + 34, by, w / 2 + 6, 20).build());
 		addRenderableWidget(Button.builder(Component.literal("Back"), b -> onClose())
-			.bounds(x + w / 2 + 4, by, w / 2 - 38, 20).build());
+			.bounds(x + w / 2 + 44, by, w / 2 - 78, 20).build());
 	}
 
 	private void pick(Entry e) {
@@ -89,7 +89,6 @@ public final class SavePickerScreen extends Screen {
 				return;
 			}
 			onPick.accept(e.path().getFileName().toString(), data);
-			minecraft.gui.setScreen(parent);
 		} catch (IOException ex) {
 			error = "Could not read the file: " + ex.getMessage();
 		}
@@ -106,7 +105,7 @@ public final class SavePickerScreen extends Screen {
 		g.centeredText(font, title, width / 2, 14, 0xFFFFFFFF);
 		g.centeredText(font, "Files come from .minecraft/gbalink/imports/ (.sav, 512 B to 128 KiB)", width / 2, 26, 0xFFAAAAAA);
 		if (entries.isEmpty()) {
-			g.centeredText(font, "No .sav files yet. Click \"Open folder\" and copy one in, then reopen.", width / 2, 50, 0xFFFFAAAA);
+			g.centeredText(font, "No .sav files yet. Click \"Open imports folder\", copy one in, then reopen.", width / 2, 50, 0xFFFFAAAA);
 		}
 		if (!error.isEmpty()) g.centeredText(font, error, width / 2, height - 14, 0xFFFF8888);
 	}

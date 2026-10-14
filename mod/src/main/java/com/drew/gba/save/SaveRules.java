@@ -14,8 +14,8 @@ public final class SaveRules {
 	public static final int RTC_FOOTER = 16;
 	/** Sizes of the battery memories a GBA cartridge can have (EEPROM 512 B / 8 KiB, SRAM 32 KiB, Flash 64/128 KiB). */
 	public static final int[] BASE_SIZES = {512, 8 * 1024, 32 * 1024, 64 * 1024, 128 * 1024};
-	/** How long after a burn the player may import an initial save for that pak. */
-	public static final long IMPORT_WINDOW_MS = 120_000L;
+	/** How many previous saves the server keeps when an import replaces one (<pak>.sav.bak1 is the newest). */
+	public static final int IMPORT_BACKUPS = 3;
 
 	private SaveRules() {}
 
@@ -75,16 +75,12 @@ public final class SaveRules {
 	}
 
 	/**
-	 * May the server accept an imported save?
-	 * @param pendingBurn the player has a just-burned pak that has not received an import yet
-	 * @param pendingAgeMs milliseconds since that burn
-	 * @param pakHasSave the pak already has a save file on the server
+	 * May the server accept an imported save for a pak?
+	 * @param hasOpenSession the importing player currently has an open session for exactly this pak
 	 * @return null if accepted, otherwise the reason
 	 */
-	public static String importRejection(boolean pendingBurn, long pendingAgeMs, boolean pakHasSave, long length) {
-		if (!pendingBurn) return "Imports are only accepted right after burning a pak";
-		if (pendingAgeMs > IMPORT_WINDOW_MS) return "Import took too long - burn the pak again";
-		if (pakHasSave) return "This pak already has a save";
+	public static String importRejection(boolean hasOpenSession, long length) {
+		if (!hasOpenSession) return "Imports are only accepted while you have this cartridge open";
 		return validateImportSize(length);
 	}
 

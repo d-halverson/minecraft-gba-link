@@ -12,7 +12,7 @@ import java.util.UUID;
 
 /** All gbalink custom payloads (see gba/SPEC.md). */
 public final class Payloads {
-	public static final int PROTOCOL = 3;
+	public static final int PROTOCOL = 4;
 	public static final int MAX_STREAM = 30000;
 	public static final int MAX_SAVE = 512 * 1024;
 	public static final int MAX_CHUNK = 30000;
@@ -26,10 +26,14 @@ public final class Payloads {
 
 	// ---- C2S ----
 
-	public record Hello(int protocol) implements CustomPacketPayload {
+	/** {@code caps} (appended in 0.4.0, 0 if absent): bit 0 = this client can run input-sync netplay (native API 2). */
+	public record Hello(int protocol, int caps) implements CustomPacketPayload {
+		public static final int CAP_NETPLAY = 1;
 		public static final Type<Hello> TYPE = mkType("hello");
 		public static final StreamCodec<RegistryFriendlyByteBuf, Hello> CODEC = StreamCodec.ofMember(
-			(v, b) -> b.writeVarInt(v.protocol), b -> new Hello(b.readVarInt()));
+			(v, b) -> { b.writeVarInt(v.protocol); b.writeVarInt(v.caps); },
+			b -> new Hello(b.readVarInt(), b.isReadable() ? b.readVarInt() : 0));
+		public Hello(int protocol) { this(protocol, 0); }
 		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
 	}
 
@@ -41,12 +45,15 @@ public final class Payloads {
 		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
 	}
 
-	/** Initial save for the pak the player just burned (protocol 2). Same chunking as SaveChunk, no pak id needed. */
-	public record ImportChunk(int offset, int total, byte[] bytes) implements CustomPacketPayload {
-		public static final Type<ImportChunk> TYPE = mkType("import_chunk");
+	/**
+	 * Replace the save of the pak this player currently has open with an imported one (protocol 4; replaces the
+	 * burn-time import of protocol 2/3). Same chunking as SaveChunk; answered with a SaveAck.
+	 */
+	public record ImportChunk(UUID pakId, int offset, int total, byte[] bytes) implements CustomPacketPayload {
+		public static final Type<ImportChunk> TYPE = mkType("import_save");
 		public static final StreamCodec<RegistryFriendlyByteBuf, ImportChunk> CODEC = StreamCodec.ofMember(
-			(v, b) -> { b.writeVarInt(v.offset); b.writeVarInt(v.total); b.writeByteArray(v.bytes); },
-			b -> new ImportChunk(b.readVarInt(), b.readVarInt(), b.readByteArray(MAX_CHUNK)));
+			(v, b) -> { b.writeUUID(v.pakId); b.writeVarInt(v.offset); b.writeVarInt(v.total); b.writeByteArray(v.bytes); },
+			b -> new ImportChunk(b.readUUID(), b.readVarInt(), b.readVarInt(), b.readByteArray(MAX_CHUNK)));
 		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
 	}
 
@@ -107,20 +114,23 @@ public final class Payloads {
 	}
 
 	/** count &lt; 2 means unplugged. */
-	public record LinkState(int playerIndex, int playerCount, List<String> names) implements CustomPacketPayload {
+	public record LinkState(int playerIndex, int playerCount, List<String> names, int mode) implements CustomPacketPayload {
+		public static final int MODE_CLASSIC = 0, MODE_NETPLAY = 1;
+		public LinkState(int playerIndex, int playerCount, List<String> names) { this(playerIndex, playerCount, names, MODE_CLASSIC); }
 		public static final Type<LinkState> TYPE = mkType("link_state");
 		public static final StreamCodec<RegistryFriendlyByteBuf, LinkState> CODEC = StreamCodec.ofMember(
 			(v, b) -> {
 				b.writeVarInt(v.playerIndex); b.writeVarInt(v.playerCount);
 				b.writeVarInt(v.names.size());
 				for (String n : v.names) b.writeUtf(n, 64);
+				b.writeVarInt(v.mode);
 			},
 			b -> {
 				int idx = b.readVarInt(), cnt = b.readVarInt(), n = b.readVarInt();
 				if (n < 0 || n > 8) throw new IllegalArgumentException("bad name count");
 				List<String> names = new ArrayList<>(n);
 				for (int i = 0; i < n; i++) names.add(b.readUtf(64));
-				return new LinkState(idx, cnt, names);
+				return new LinkState(idx, cnt, names, b.isReadable() ? b.readVarInt() : MODE_CLASSIC);
 			});
 		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
 	}
@@ -203,6 +213,119 @@ public final class Payloads {
 		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
 	}
 
+
+	// ---- Netplay link (protocol 4, 0.4.0) ----
+
+	public static final int MAX_NETPLAY_RECS = 16, MAX_NETPLAY_ECHO = 12, MAX_NETPLAY_SNAPSHOT = 4 * 1024 * 1024;
+
+	private static void writeInput(RegistryFriendlyByteBuf b, long session, int first, short[] recs, int sendMs, int[] echo) {
+		b.writeVarLong(session); b.writeVarInt(first); b.writeVarInt(recs.length);
+		for (short r : recs) b.writeShort(r);
+		b.writeVarInt(sendMs); b.writeVarInt(echo.length);
+		for (int e : echo) b.writeVarInt(e);
+	}
+
+	private static short[] readRecs(RegistryFriendlyByteBuf b) {
+		int n = b.readVarInt();
+		if (n < 0 || n > MAX_NETPLAY_RECS) throw new IllegalArgumentException("bad record count");
+		short[] r = new short[n];
+		for (int i = 0; i < n; i++) r[i] = b.readShort();
+		return r;
+	}
+
+	private static int[] readEcho(RegistryFriendlyByteBuf b) {
+		int n = b.readVarInt();
+		if (n < 0 || n > MAX_NETPLAY_ECHO) throw new IllegalArgumentException("bad echo count");
+		int[] e = new int[n];
+		for (int i = 0; i < n; i++) e[i] = b.readVarInt();
+		return e;
+	}
+
+	/** S2C: a netplay session begins (or restarts) for this player. */
+	public record NetplayStart(long sessionId, int index, int count, List<String> names, long epoch, int tzOffset, int delay) implements CustomPacketPayload {
+		public static final Type<NetplayStart> TYPE = mkType("netplay_start");
+		public static final StreamCodec<RegistryFriendlyByteBuf, NetplayStart> CODEC = StreamCodec.ofMember(
+			(v, b) -> {
+				b.writeVarLong(v.sessionId); b.writeVarInt(v.index); b.writeVarInt(v.count);
+				b.writeVarInt(v.names.size());
+				for (String n : v.names) b.writeUtf(n, 64);
+				b.writeLong(v.epoch); b.writeInt(v.tzOffset); b.writeVarInt(v.delay);
+			},
+			b -> {
+				long sid = b.readVarLong(); int idx = b.readVarInt(), cnt = b.readVarInt(), n = b.readVarInt();
+				if (n < 0 || n > 8) throw new IllegalArgumentException("bad name count");
+				List<String> names = new ArrayList<>(n);
+				for (int i = 0; i < n; i++) names.add(b.readUtf(64));
+				return new NetplayStart(sid, idx, cnt, names, b.readLong(), b.readInt(), b.readVarInt());
+			});
+		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+	}
+
+	/**
+	 * C2S: controller records for frames firstFrame.. (one short each: keys in bits 0-9, delay proposal in bits 10-13),
+	 * the sender's clock (ms) and echoes (player, theirSendMs, holdMs triples, flattened) for round trip measurement.
+	 */
+	public record NetplayInputC2S(long sessionId, int firstFrame, short[] recs, int sendMs, int[] echo) implements CustomPacketPayload {
+		public static final Type<NetplayInputC2S> TYPE = mkType("netplay_input");
+		public static final StreamCodec<RegistryFriendlyByteBuf, NetplayInputC2S> CODEC = StreamCodec.ofMember(
+			(v, b) -> writeInput(b, v.sessionId, v.firstFrame, v.recs, v.sendMs, v.echo),
+			b -> new NetplayInputC2S(b.readVarLong(), b.readVarInt(), readRecs(b), b.readVarInt(), readEcho(b)));
+		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+	}
+
+	public record NetplayInputS2C(long sessionId, int from, int firstFrame, short[] recs, int sendMs, int[] echo) implements CustomPacketPayload {
+		public static final Type<NetplayInputS2C> TYPE = mkType("netplay_input");
+		public static final StreamCodec<RegistryFriendlyByteBuf, NetplayInputS2C> CODEC = StreamCodec.ofMember(
+			(v, b) -> { b.writeVarInt(v.from); writeInput(b, v.sessionId, v.firstFrame, v.recs, v.sendMs, v.echo); },
+			b -> { int from = b.readVarInt(); return new NetplayInputS2C(b.readVarLong(), from, b.readVarInt(), readRecs(b), b.readVarInt(), readEcho(b)); });
+		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+	}
+
+	/** C2S: hash of all consoles after netplay frame {@code frame} (every 60th frame), tagged with the resync generation. */
+	public record NetplayHashC2S(long sessionId, int gen, int frame, int hash) implements CustomPacketPayload {
+		public static final Type<NetplayHashC2S> TYPE = mkType("netplay_hash");
+		public static final StreamCodec<RegistryFriendlyByteBuf, NetplayHashC2S> CODEC = StreamCodec.ofMember(
+			(v, b) -> { b.writeVarLong(v.sessionId); b.writeVarInt(v.gen); b.writeVarInt(v.frame); b.writeInt(v.hash); },
+			b -> new NetplayHashC2S(b.readVarLong(), b.readVarInt(), b.readVarInt(), b.readInt()));
+		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+	}
+
+	public record NetplayHashS2C(long sessionId, int from, int gen, int frame, int hash) implements CustomPacketPayload {
+		public static final Type<NetplayHashS2C> TYPE = mkType("netplay_hash");
+		public static final StreamCodec<RegistryFriendlyByteBuf, NetplayHashS2C> CODEC = StreamCodec.ofMember(
+			(v, b) -> { b.writeVarInt(v.from); b.writeVarLong(v.sessionId); b.writeVarInt(v.gen); b.writeVarInt(v.frame); b.writeInt(v.hash); },
+			b -> { int from = b.readVarInt(); return new NetplayHashS2C(b.readVarLong(), from, b.readVarInt(), b.readVarInt(), b.readInt()); });
+		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+	}
+
+	/**
+	 * C2S: one chunk (at most 30000 bytes) of a deflated snapshot blob. gen 0 = a player's own console at session start,
+	 * gen &gt; 0 = player 0's resync snapshot of all consoles taken before netplay frame {@code frame}.
+	 */
+	public record NetplaySnapshotC2S(long sessionId, int gen, int frame, int offset, int total, byte[] bytes) implements CustomPacketPayload {
+		public static final Type<NetplaySnapshotC2S> TYPE = mkType("netplay_snapshot");
+		public static final StreamCodec<RegistryFriendlyByteBuf, NetplaySnapshotC2S> CODEC = StreamCodec.ofMember(
+			(v, b) -> { b.writeVarLong(v.sessionId); b.writeVarInt(v.gen); b.writeVarInt(v.frame); b.writeVarInt(v.offset); b.writeVarInt(v.total); b.writeByteArray(v.bytes); },
+			b -> new NetplaySnapshotC2S(b.readVarLong(), b.readVarInt(), b.readVarInt(), b.readVarInt(), b.readVarInt(), b.readByteArray(MAX_CHUNK)));
+		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+	}
+
+	public record NetplaySnapshotS2C(long sessionId, int from, int gen, int frame, int offset, int total, byte[] bytes) implements CustomPacketPayload {
+		public static final Type<NetplaySnapshotS2C> TYPE = mkType("netplay_snapshot");
+		public static final StreamCodec<RegistryFriendlyByteBuf, NetplaySnapshotS2C> CODEC = StreamCodec.ofMember(
+			(v, b) -> { b.writeVarInt(v.from); b.writeVarLong(v.sessionId); b.writeVarInt(v.gen); b.writeVarInt(v.frame); b.writeVarInt(v.offset); b.writeVarInt(v.total); b.writeByteArray(v.bytes); },
+			b -> { int from = b.readVarInt(); return new NetplaySnapshotS2C(b.readVarLong(), from, b.readVarInt(), b.readVarInt(), b.readVarInt(), b.readVarInt(), b.readByteArray(MAX_CHUNK)); });
+		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+	}
+
+	/** C2S: this client cannot continue the session (failure it could not recover from); the server restarts it for everyone. */
+	public record NetplayRestartC2S(long sessionId) implements CustomPacketPayload {
+		public static final Type<NetplayRestartC2S> TYPE = mkType("netplay_restart");
+		public static final StreamCodec<RegistryFriendlyByteBuf, NetplayRestartC2S> CODEC = StreamCodec.ofMember(
+			(v, b) -> b.writeVarLong(v.sessionId), b -> new NetplayRestartC2S(b.readVarLong()));
+		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+	}
+
 	/** Register all payload types (call from the common initializer on both sides). */
 	public static void register() {
 		var c2s = PayloadTypeRegistry.serverboundPlay();
@@ -215,6 +338,10 @@ public final class Payloads {
 		c2s.register(CrtStreamC2S.TYPE, CrtStreamC2S.CODEC);
 		c2s.register(CrtClose.TYPE, CrtClose.CODEC);
 		c2s.register(CrtNeedKeyframe.TYPE, CrtNeedKeyframe.CODEC);
+		c2s.register(NetplayInputC2S.TYPE, NetplayInputC2S.CODEC);
+		c2s.register(NetplayHashC2S.TYPE, NetplayHashC2S.CODEC);
+		c2s.register(NetplaySnapshotC2S.TYPE, NetplaySnapshotC2S.CODEC);
+		c2s.register(NetplayRestartC2S.TYPE, NetplayRestartC2S.CODEC);
 		var s2c = PayloadTypeRegistry.clientboundPlay();
 		s2c.register(Open.TYPE, Open.CODEC);
 		s2c.register(Welcome.TYPE, Welcome.CODEC);
@@ -225,5 +352,9 @@ public final class Payloads {
 		s2c.register(CrtStreamS2C.TYPE, CrtStreamS2C.CODEC);
 		s2c.register(CrtKeyframeRequest.TYPE, CrtKeyframeRequest.CODEC);
 		s2c.register(CrtView.TYPE, CrtView.CODEC);
+		s2c.register(NetplayStart.TYPE, NetplayStart.CODEC);
+		s2c.register(NetplayInputS2C.TYPE, NetplayInputS2C.CODEC);
+		s2c.register(NetplayHashS2C.TYPE, NetplayHashS2C.CODEC);
+		s2c.register(NetplaySnapshotS2C.TYPE, NetplaySnapshotS2C.CODEC);
 	}
 }

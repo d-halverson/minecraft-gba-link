@@ -42,6 +42,32 @@ public final class SaveStore {
 		return SaveRules.revision(data);
 	}
 
+	/**
+	 * Replaces the save with an imported one. The previous save (if any) is kept as {@code <pakId>.sav.bak1}; older
+	 * backups shift to bak2 and bak3 and the oldest is dropped. Returns the new revision.
+	 */
+	public String writeImport(UUID pakId, byte[] data) throws IOException {
+		Path f = file(pakId);
+		if (Files.isRegularFile(f)) {
+			rotateBackups(f, SaveRules.IMPORT_BACKUPS);
+			Files.copy(f, backup(f, 1), StandardCopyOption.REPLACE_EXISTING);
+		}
+		writeAtomic(f, data);
+		return SaveRules.revision(data);
+	}
+
+	private static Path backup(Path save, int n) {
+		return save.resolveSibling(save.getFileName() + ".bak" + n);
+	}
+
+	/** bak(n-1) -> bak(n) for n = count..2 (the oldest falls off). */
+	static void rotateBackups(Path save, int count) throws IOException {
+		for (int n = count; n >= 2; n--) {
+			Path from = backup(save, n - 1);
+			if (Files.isRegularFile(from)) Files.move(from, backup(save, n), StandardCopyOption.REPLACE_EXISTING);
+		}
+	}
+
 	public String revision(UUID pakId) {
 		return SaveRules.revision(read(pakId));
 	}

@@ -16,8 +16,8 @@ A Fabric mod for **Minecraft 26.3**, built on the [mGBA](https://mgba.io/) emula
 * **Real link cable support.** Use a Link Cable on a friend and play multiplayer GBA games together
   (2 to 4 players), for example trading or battling.
 * **Saves live on the server**, inside each Game Pak, so a pak keeps its progress when you hand it to a
-  friend or log in from another computer. Closing the screen suspends your game exactly where it was; save states (F5 / F8), fast-forward
-  (Space or Tab) and .sav export / import are built in.
+  friend or log in from another computer. Closing the screen suspends your game exactly where it was; save states
+  (F5 / F8), fast-forward (Space or Tab) and `.sav` export / import are built in.
 * **Easy to host.** One mod jar (plus Fabric API) on the server. Recipes are built into the mod, no
   datapack needed. Players without the mod can still join and see the items; they just can't play.
 * **Bring your own ROMs.** No games, BIOS files or downloads are included or provided by this project.
@@ -25,6 +25,20 @@ A Fabric mod for **Minecraft 26.3**, built on the [mGBA](https://mgba.io/) emula
   need a BIOS file either.)
 
 Works on Windows (x64), macOS (Intel and Apple Silicon) and Linux (x64).
+
+## Which file do I need?
+
+Everything is on the [Releases](../../releases) page.
+
+| Release file | What it is | Who needs it |
+| --- | --- | --- |
+| `gbalink-x.y.z.jar` | The mod itself (client and server in one jar, emulator included) | **The server and every player.** Together with [Fabric API](https://modrinth.com/mod/fabric-api) |
+| `gbalink-x.y.z.mrpack` | A one-click Prism / Modrinth App instance that installs Minecraft 26.3, Fabric, Fabric API **and** the mod | Players only, optional convenience. Not for servers |
+| `gbalink-resourcepack-x.y.z.zip` | Item textures and models | **Optional, server owners only**: lets players *without* the mod see the textures. Players with the mod do not need it |
+| `SHA256SUMS.txt` | Checksums of the other files | Optional: to verify your download |
+
+**Everyone must run the same mod version as the server.** If the versions differ, the GBA tells you to
+update the mod instead of failing.
 
 ## Server install
 
@@ -34,21 +48,22 @@ Requires Java 25 and a [Fabric](https://fabricmc.net/use/server/) server for Min
 1. Set up a Fabric server for 26.3 and start it once.
 2. Put these two files into the server's `mods/` folder:
    * [Fabric API](https://modrinth.com/mod/fabric-api) `0.162.0+26.3` (or newer for 26.3)
-   * `gbalink-<version>.jar` from the [Releases](../../releases) page
-3. Restart the server. That's all: the crafting recipes ship inside the jar.
+   * `gbalink-<version>.jar`
+3. Restart the server. That's all: the crafting recipes ship inside the jar. Tell your players to install the
+   **same version** of the mod ([Client install](#client-install)).
 
-**Optional: item textures for vanilla players.** Players who have the mod see the custom item
-textures automatically. To give players *without* the mod nicer textures too, host
-`gbalink-resourcepack-<version>.zip` (also on the Releases page) at a direct download URL and set it as the server resource
-pack in `server.properties`:
+**Optional: item textures for vanilla players.** Players who have the mod see the custom item textures
+automatically. To give players *without* the mod nicer textures too, host
+`gbalink-resourcepack-<version>.zip` at a direct download URL and set it as the server resource pack in
+`server.properties`:
 
 ```properties
-resource-pack=https://example.com/gbalink-resourcepack-0.3.0.zip
+resource-pack=https://example.com/gbalink-resourcepack-0.4.0.zip
 resource-pack-sha1=<sha1 of the zip>
 ```
 
-Get the checksum with `shasum -a 1 gbalink-resourcepack-0.3.0.zip` (macOS/Linux) or
-`certutil -hashfile gbalink-resourcepack-0.3.0.zip SHA1` (Windows). Without the resource pack, vanilla
+Get the checksum with `shasum -a 1 gbalink-resourcepack-0.4.0.zip` (macOS/Linux) or
+`certutil -hashfile gbalink-resourcepack-0.4.0.zip SHA1` (Windows). Without the resource pack, vanilla
 players simply see the plain base items (amethyst shard, iron nugget, copper ingot) with their custom names.
 
 **Vanilla clients can still join.** The mod registers no blocks, items or other registry entries; the
@@ -64,22 +79,28 @@ use one.
 | `/gba info` | everyone | Shows whether your client has the mod and your link status |
 | `/gba unlink` | everyone | Removes your link cable connection |
 
-Saves are stored in the world folder: `world/gbalink/saves/<pak id>.sav`. Back them up with your world.
-Clients and server must run the same protocol: the 0.3.0 mod on one side and 0.1.0 on the other will not
-play together; the player is told to update the mod.
+**Server files.** Saves are stored in the world folder: `world/gbalink/saves/<pak id>.sav` (back them up with
+your world). When a player imports a save, the previous one is kept next to it as `<pak id>.sav.bak1`,
+`.bak2`, `.bak3` (newest first). Settings live in `config/gbalink.properties` (see [CRT TV](#crt-tv)).
 
 ## Client install
 
 Players need the mod on their own computer to actually play. The game must be Minecraft **26.3** with
-Fabric Loader **0.19.5** or newer.
+Fabric Loader **0.19.5** or newer, and the mod must be the same version as the server's.
 
 ### Option A: official Minecraft Launcher
 
+Download these from [Modrinth](https://modrinth.com/mod/fabric-api/versions) and the [Releases](../../releases)
+page:
+
+* **Fabric API** `0.162.0+26.3` (a `.jar`)
+* **`gbalink-<version>.jar`**
+
+Then:
+
 1. Download the [Fabric installer](https://fabricmc.net/use/installer/), run it, pick **Minecraft 26.3**
    and **loader 0.19.5**, and click Install. This creates a "fabric-loader-26.3" profile.
-2. Download **Fabric API** `0.162.0+26.3` (from [Modrinth](https://modrinth.com/mod/fabric-api/versions))
-   and `gbalink-<version>.jar` (from [Releases](../../releases)).
-3. Put both jars into your `mods` folder (create it if it doesn't exist):
+2. Put both jars into your `mods` folder (create it if it doesn't exist):
 
    | OS | Folder |
    | --- | --- |
@@ -87,34 +108,53 @@ Fabric Loader **0.19.5** or newer.
    | macOS | `~/Library/Application Support/minecraft/mods` |
    | Linux | `~/.minecraft/mods` |
 
-4. Start the launcher, choose the **Fabric** profile, and play. Fabric API and Java 25 are required (the
-   launcher downloads a suitable Java automatically).
+3. Start the launcher, choose the **Fabric** profile, and play. Java 25 is required (the launcher downloads a
+   suitable Java automatically).
 
-### Option B: Prism Launcher (or the Modrinth App)
+### Option B: Prism Launcher or the Modrinth App
 
-**Easy path:** download `gbalink-<version>.mrpack` from [Releases](../../releases) and import it
-(Prism: *Add Instance, Import*, drop the file in; Modrinth App: *Add instance, From file*).
-It sets up Minecraft 26.3, Fabric Loader 0.19.5, Fabric API and GBA Link in one go.
+**Easy path.** Download **`gbalink-<version>.mrpack`** from the [Releases](../../releases) page and import it
+(Prism: *Add Instance, Import*, drop the file in; Modrinth App: *Add instance, From file*). It installs
+Minecraft 26.3, Fabric Loader, Fabric API and GBA Link in one go. Nothing else to download.
 
-**Manual path:**
+**Manual path.** Download **Fabric API** `0.162.0+26.3` and **`gbalink-<version>.jar`**, then:
 
 1. Create a new instance for Minecraft **26.3** and choose **Fabric** as the loader.
-2. Open *Edit instance, Mods, Download mods*, search for **Fabric API** on Modrinth, and install the
-   version for 26.3.
-3. Click *Add file* (or open the mods folder) and add `gbalink-<version>.jar`.
+2. Open *Edit instance, Mods*, click *Add file* (or open the mods folder), and add both jars.
+
+(In Prism you can also let it download Fabric API for you under *Download mods*.)
+
+## Folders
+
+The mod creates all of these **automatically the first time you launch Minecraft with it installed**, inside the
+`gbalink/` folder of your game directory:
+
+| Launcher | Game directory |
+| --- | --- |
+| Official launcher, Windows | `%APPDATA%\.minecraft` |
+| Official launcher, macOS | `~/Library/Application Support/minecraft` |
+| Official launcher, Linux | `~/.minecraft` |
+| Prism Launcher | right-click the instance, *Folder*, then open `minecraft/` (older instances: `.minecraft/`) |
+| Modrinth App | the instance's folder (*Open folder* on the instance page) |
+
+| Folder in `gbalink/` | What goes in it |
+| --- | --- |
+| `roms/` | **Put your `.gba` games here** (a `README.txt` explains it) |
+| `imports/` | **Put `.sav` files here** to import them into a cartridge |
+| `exports/` | Saves written by *Export .sav*, and the automatic backup made before every import |
+| `saves/` | Automatic local copy of each pak's last uploaded save |
+| `states/` | `F5` save states, one per pak |
+| `suspend/` | Suspended games, one per pak |
+| `natives/` | The emulator library, unpacked from the jar (nothing to do) |
+| `link.log` | Link cable statistics, written only while a link cable is in use |
+
+**Quick way there:** in the burn screen, **Open ROMs folder** opens `roms/`; in the import screen,
+**Open imports folder** opens `imports/`.
 
 ## Adding games
 
-Copy your own `.gba` files into the `gbalink/roms/` folder of your game directory. It is created the
-first time you start Minecraft with the mod (with a short `README.txt` inside), and the burn screen has an
-**Open ROMs folder** button that opens it in your file manager.
-
-| Launcher | ROM folder |
-| --- | --- |
-| Windows | `%APPDATA%\.minecraft\gbalink\roms` |
-| macOS | `~/Library/Application Support/minecraft/gbalink/roms` |
-| Linux | `~/.minecraft/gbalink/roms` |
-| Prism / Modrinth App | `<instance folder>/minecraft/gbalink/roms` (or `.minecraft`; in Prism right-click the instance, *Folder*) |
+Copy your own `.gba` files into `gbalink/roms/` (see [Folders](#folders)). The burn screen rescans the folder every time you open it, so there is no need to restart
+Minecraft.
 
 Games are matched by **SHA-1 of the ROM file**. When a Game Pak is burned, it remembers the checksum of
 that ROM. Everyone who wants to play that pak must have the *exact same ROM file* (same dump, same
@@ -155,6 +195,7 @@ back in your off hand.
 | Save state / load state | `F5` / `F8` |
 | Close (suspends the game) | `Esc` |
 | Power off | `P`, or click the power switch on the top edge of the GBA |
+| Export / import the save | buttons **Export .sav** / **Import .sav** under the screen |
 
 **Suspend and power switch.** Closing the GBA screen (`Esc` or the Close button) does not turn the console
 off: it uploads your battery save to the server and writes a *suspend state* to
@@ -172,29 +213,26 @@ suspend state is thrown away and the game starts fresh from the latest save, wit
 Your in-game save (battery save) is uploaded to the server as you play and stored per pak. Every
 successful upload is also copied to `gbalink/saves/<pak id>.sav` on your computer as a personal backup.
 Save states (F5 / F8) are an extra, local snapshot kept per pak on your own computer
-(`gbalink/states/<pak id>.state`; a state saved by 0.1.0 under the ROM's checksum is copied over on first use).
+(`gbalink/states/<pak id>.state`).
 
-**Export a save.** The **Export .sav** button on the GBA screen writes the current battery save to
-`gbalink/exports/<game>-<date>.sav`. These are the emulator's battery files, the same format other emulators
-(mGBA and others) use: 512 B or 8 KiB (EEPROM), 32 KiB (SRAM), 64 or 128 KiB (Flash). For games with a
+**Export a save.** Click **Export .sav** on the GBA screen (on a CRT: press `E`). It writes the current battery
+save to `gbalink/exports/<game>-<date>.sav`. These are the emulator's battery files, the same format other
+emulators (mGBA and others) use: 512 B or 8 KiB (EEPROM), 32 KiB (SRAM), 64 or 128 KiB (Flash). For games with a
 real-time clock mGBA appends a 16-byte clock footer; mGBA reads it, other emulators ignore or trim it.
 
-**Import a save.** Put a `.sav` file into `gbalink/imports/`, hold a Blank Game Pak, and in the burn screen
-click **Burn with existing save...**, choose the file, then choose the game. The new pak starts with that save.
-Only the standard sizes (512 B, 8, 32, 64, 128 KiB, each optionally plus 16 bytes of clock footer, never more
-than 512 KiB) are accepted, and the server only takes an import as the very first save of a pak you just burned
-(within two minutes).
+**Import a save.** Put a `.sav` file into `gbalink/imports/` (**Open imports folder** in the picker gets you there),
+open the game, and click **Import .sav** on the GBA screen (on a CRT: press `I`). Pick the file and confirm
+"Replace this cartridge's save with ...?". Then:
 
-**Folders** (all inside `gbalink/` in your game directory):
+1. your current save is exported to `gbalink/exports/` first (the file name ends in `-before-import.sav`);
+2. the file is uploaded and replaces the cartridge's save on the server (the server keeps the previous one as
+   `.sav.bak1` to `.bak3`);
+3. any suspended game for that pak is discarded and the game restarts from the imported save (a cold boot), with an
+   "Imported <file>" message.
 
-| Folder | Contents |
-| --- | --- |
-| `roms/` | your `.gba` games (with a `README.txt`) |
-| `imports/` | `.sav` files you want to burn onto a new pak |
-| `exports/` | saves written by Export .sav |
-| `saves/` | automatic local copy of each pak's last uploaded save |
-| `suspend/` | suspended games, one per pak |
-| `states/` | F5 save states, one per pak |
+This replaces the old "Burn with existing save" option (0.2.0 to 0.3.0). Only the standard sizes (512 B, 8, 32, 64,
+128 KiB, each optionally plus 16 bytes of clock footer, never more than 512 KiB) are accepted, and the server only
+takes an import from the player who currently has that cartridge open.
 
 ## CRT TV
 
@@ -213,9 +251,22 @@ too (with the optional resource pack) but only players with the mod can play or 
 * **Insert a game.** Hold a Game Pak in your off hand and **sneak + right-click** the TV; sneak + right-click with an
   empty off hand ejects it.
 * **Play.** Right-click the TV (stand 3 to 6 blocks away). The camera turns to the screen and the game appears on the
-  TV in the world; the world keeps rendering. Controls are the same as on the GBA (arrows, `X`/`Z`, `A`/`S`, `Enter`,
-  `Backspace`, `Space` fast-forward, `F5`/`F8`, `P` power off) and `Esc` leaves (the game is suspended exactly like
-  closing the GBA). Saves, suspend states and link cables work the same. One player at a time per TV.
+  TV in the world; the world keeps rendering. **The crosshair, held item and the whole HUD (hotbar, health, XP, ...)
+  are hidden while you play**, like F1, so you only see the TV plus a small hint line at the bottom; your previous
+  setting (including F1 already being on) is restored exactly when you leave. Nothing is saved to `options.txt`.
+  Controls are the same as on the GBA, plus two keys for saves:
+
+  | CRT | Key |
+  | --- | --- |
+  | D-pad / A / B / L / R / Start / Select | Arrows / `X` / `Z` / `A` / `S` / `Enter` / `Backspace` |
+  | Fast-forward (hold) | `Space` (or `Tab`) |
+  | Save state / load state | `F5` / `F8` |
+  | **Export the save** | `E` (to `gbalink/exports/`) |
+  | **Import a save** | `I` (picker, then confirmation; the game keeps running behind it) |
+  | Power off | `P` |
+  | Leave (suspends the game like closing the GBA) | `Esc` |
+
+  Saves, suspend states and link cables work the same. One player at a time per TV.
 * **Watch.** Modded players within 48 blocks see the live picture on the TV and hear it (low quality, about 8 KB/s).
   The sound gets quieter with distance (silent beyond 24 blocks), pans left and right, and follows Minecraft's master
   volume; only the nearest TV is heard. At most 10 players watch one TV (nearest first); others see
@@ -232,7 +283,7 @@ too (with the optional resource pack) but only players with the mod can play or 
   KB/s (the picture is capped at 285 KB/s and the server drops a streamer that exceeds ~1 MB/s). The server sends that
   stream once per viewer, so a TV with 10 viewers can cost the server 10 times the upload. Lower `crt_max_viewers` on
   small connections. Everything is relayed by the server; clients never connect to each other.
-* Clients and servers must both run 0.3.0 (protocol 3): an older client is told to update the mod.
+* Clients and servers must run the same mod version (protocol 4 since 0.4.0): an older client is told to update the mod.
 
 ## Link cable
 
@@ -241,10 +292,31 @@ Up to **4 players** can share one cable room; use the cable on each additional f
 **opens their GBA** (with a link-capable game, such as a trading or multiplayer menu) and the games find
 each other, just like real GBAs. You are disconnected if you wander out of range, or with `/gba unlink`.
 
-Speed depends on your ping, honestly: every link transfer needs a network round trip, and the emulator
-waits for it. On a LAN or a nearby server most games feel fine; over the internet, games that exchange
-data every single frame (some multiplayer action games) run at roughly your round-trip rate.
-Trading and turn-based battling work well even with higher ping.
+### Netplay: full speed over the internet (same game)
+
+When every linked player's Game Pak was burned from the **same ROM file** (e.g. two copies of the same
+Pokémon game), the link runs in **netplay** mode:
+
+* Every player's computer runs **all** the linked consoles, wired together with zero delay, and only the
+  **button presses** travel over the network (a few bytes per frame). The games never wait for the network,
+  so they run at full speed even with 100+ ms ping.
+* Your buttons take effect a few frames late while linked (the **input delay**, adapted automatically to your
+  ping: about 3 frames ≈ 50 ms at 50 ms ping). Turn-based games like Pokémon don't notice.
+* While connecting you see "Connecting link…" (each console's state is sent to the others once). Then the
+  status line reads e.g. `Link: P1 of 2 · netplay · delay 3f · ping 48 ms`.
+* The consoles are compared every second; if they ever drift apart they are repaired automatically.
+* While linked: fast-forward, save/load state and Import .sav are disabled, and the cartridge clock (Pokémon
+  Emerald has one) is a shared virtual clock. Only your own console's save goes to the server.
+* Closing your GBA, breaking the cable, walking out of range or disconnecting ends the link; the others
+  reconnect automatically and a lone player just keeps playing.
+
+More detail: [`docs/netplay.md`](docs/netplay.md).
+
+### Classic link (different games)
+
+If the players have **different** ROMs (e.g. Ruby with Emerald), the status line says
+`Link (different games — slow mode)`. Each link transfer then waits for a network round trip, so games
+that link every frame slow down with ping (fine on a LAN, slow over the internet).
 
 ## Supported platforms
 
@@ -288,7 +360,9 @@ submodule.
 
 ## Known limitations
 
-* **Link speed over the internet** is bound by latency (see above).
+* **Netplay needs the same ROM** on every linked Game Pak; different games use the slower classic link.
+  Netplay has a small input delay (2–10 frames, adaptive), and it has been tested with homebrew link
+  ROMs and simulated ping, not yet with every commercial game. Please report games that desync.
 * **No Wireless Adapter**, GBA Player, JOY bus or UART mode. Only the cable modes (Normal 8/32-bit and
   Multiplayer, 2 to 4 players) are emulated. Normal mode with 3 to 4 players is only approximate.
 * **mGBA 0.10.5 accuracy:** very accurate for commercial games, but a few exotic hardware edge cases
@@ -299,7 +373,7 @@ submodule.
 * Everyone playing the same pak must have the identical ROM file.
 * **CRT TV:** one player per TV, spectators must have the mod and be within the view distance; the cabinet's
   controller and console are decoration (they do nothing).
-* Early version (0.3.0): expect rough edges. Please report bugs with your OS, game and what happened.
+* Early version (0.4.0): expect rough edges. Please report bugs with your OS, game and what happened.
 
 ## Credits and license
 

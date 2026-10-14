@@ -61,4 +61,20 @@ class EffectiveLinkTest {
 		assertEquals(List.of("a", "c"), rooms.room("a"));
 		assertFalse(EffectiveLink.states(rooms.room("a"), open::contains).get("c").plugged());
 	}
+
+	@Test
+	void netplayNeedsTwoPlayersTheSameRomAndCapableClients() {
+		java.util.Map<String, String> sha = java.util.Map.of("a", "AA11", "b", "aa11", "c", "bb22", "d", "");
+		assertTrue(EffectiveLink.netplay(List.of("a", "b"), sha::get, k -> true), "same ROM (case-insensitive) -> netplay");
+		assertFalse(EffectiveLink.netplay(List.of("a", "c"), sha::get, k -> true), "different ROM -> classic link");
+		assertFalse(EffectiveLink.netplay(List.of("a", "b", "c"), sha::get, k -> true), "one different pak in three -> classic link");
+		assertFalse(EffectiveLink.netplay(List.of("a"), sha::get, k -> true), "one player is not a link");
+		assertFalse(EffectiveLink.netplay(List.of("a", "b"), sha::get, k -> !k.equals("b")), "a client without the capability -> classic");
+		assertFalse(EffectiveLink.netplay(List.of("a", "d"), sha::get, k -> true), "unknown ROM -> classic");
+		assertFalse(EffectiveLink.netplay(List.of("a", "zz"), sha::get, k -> true), "no pak data -> classic");
+		var st = EffectiveLink.states(ROOM, java.util.Set.of("c", "d")::contains, true);
+		assertTrue(st.get("c").netplay());
+		assertFalse(st.get("a").netplay());
+		assertNotEquals(EffectiveLink.states(ROOM, java.util.Set.of("c", "d")::contains, false).get("c"), st.get("c"));
+	}
 }

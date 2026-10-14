@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.4.0
+
+* **Import .sav in the emulator** (replaces "Burn with existing save..."). There is an **Import .sav** button next to
+  **Export .sav** on the GBA screen, and on the CRT the `I` key (`E` exports). Pick a file from `gbalink/imports/`
+  (the picker has an **Open imports folder** button), confirm "Replace this cartridge's save with ...?", and the game
+  restarts from the imported save with an "Imported <file>" message. Your current save is exported to
+  `gbalink/exports/` (`...-before-import.sav`) first, a suspended game for that pak is discarded, and the server keeps
+  the previous save as `<pak id>.sav.bak1` to `.bak3`. The server only accepts an import from the player who has that
+  cartridge open, and still validates the save size. The burn picker no longer has the import option.
+* **CRT: clean view.** While you play on a CRT the crosshair, held item and the whole HUD are hidden (like F1); your
+  previous state is restored exactly when you leave. Only a small hint line stays. Nothing is written to `options.txt`.
+* **Fix: audio flickers and clicks while paused.** The emulator and the CRT spectator audio lines no longer replay stale
+  buffer data when nothing is playing (Minecraft pause menu, screen closed or suspended, leaving the CRT, power off):
+  audio fades out over about 10 ms, the line is fed silence, and it fades back in on resume. Covered by a unit test
+  that captures what is written to the device.
+* The GBA screen buttons are `Save (F5)`, `Load (F8)`, `Export .sav`, `Import .sav`, `Close (Esc)`.
+* All `gbalink/` folders (`exports`, `saves`, `states`, `suspend`, `natives`) are now created on the first launch.
+* **README rewritten:** a release-files table (which file is for whom), separate server and client install
+  sections, a folders section (per launcher), and updated play, import/export and CRT controls.
+* **Netplay link: full speed over the internet.** When every linked player has a pak with the same game, the link no
+  longer waits for the network on every transfer. Each client runs all linked consoles itself, connected with zero
+  latency, and only controller inputs cross the network (with a small automatic input delay of 2 to 10 frames that
+  adapts to your ping). Pokemon trading and battling no longer crawl at 100 ms ping; the old link needed a round trip per
+  transfer (17 fps at 50 ms, 9 fps at 100 ms). Different games keep working with the old lockstep link, now called
+  "classic link" (shown as "Link (different games - slow mode)"). Details: `docs/netplay.md`.
+  * The status line reads "Link: P1 of 2 - netplay - delay 3f - ping 48 ms"; the line below shows fps, stalls/s, delay and
+    desyncs. Clients compare a hash of all consoles every second; a mismatch is logged to `gbalink/link.log` and
+    repaired automatically (player 0's consoles are sent to everybody).
+  * Fast-forward, save/load state and import are off while linked; closing the GBA, breaking the cable, walking away or
+    disconnecting ends the link for everybody. The remaining players restart it; a lone player continues seamlessly from
+    the state of their console. Only your own console's save is uploaded.
+  * Native library API version 2: `gba_set_rtc` gives every client the same cartridge clock (virtual, UTC, advancing with
+    emulated time); loading a state now resets the link bookkeeping to fixed values; `gba_save_state` zeroes its buffer.
+    Version 1 libraries still load but cannot do netplay.
+  * CI runs a cross-platform determinism check (Linux, Windows, macOS arm64 and x86_64 must produce identical hashes).
+  * Network protocol 4 also gains `netplay_start`, `netplay_input`, `netplay_hash`, `netplay_snapshot`,
+    `netplay_restart`, a `mode` field in `link_state` and a capabilities field in `hello` (see SPEC.md).
+* Network protocol 4: `import_chunk` is replaced by `import_save` {pakId, offset, total, bytes}; mismatched
+  client/server versions are told to update the mod.
+
 ## 0.3.0
 
 * **CRT TV.** A new craftable, placeable item (`/gba give crt`): a 90s-style wooden TV cabinet, 2 blocks wide and 2

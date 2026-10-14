@@ -5,13 +5,13 @@ import com.drew.gba.client.crt.CrtClient;
 import com.drew.gba.client.crt.CrtStreamer;
 import com.drew.gba.client.emu.EmulatorSession;
 import com.drew.gba.client.emu.GbaNative;
+import com.drew.gba.client.netplay.NetplayEngine;
 import com.drew.gba.client.ui.CrtScreen;
 import com.drew.gba.client.ui.GbaScreen;
 import com.drew.gba.client.ui.RomPickerScreen;
 import com.drew.gba.net.Payloads;
 import com.drew.gba.save.SaveRules;
 import com.drew.gba.save.SuspendFile;
-import com.drew.gba.server.SaveStore;
 import com.mojang.blaze3d.platform.InputConstants;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
@@ -38,13 +38,12 @@ import java.util.UUID;
 public class GbaLinkClient implements ClientModInitializer {
 	private static KeyMapping burnKey;
 
-	private static EmulatorSession current;
+	private static volatile EmulatorSession current;
 	/** A session that was closed but is still flushing its save / writing the suspend state. */
 	private static volatile EmulatorSession closing;
 	/** Protocol the server announced in Welcome; 0 = not (yet) announced, i.e. an old server. */
 	private static int serverProtocol;
 	/** Save bytes sent for the pak that is being burned right now (to mirror them when the server acks). */
-	private static byte[] pendingImport;
 	private static int linkIndex, linkCount;
 	private static List<String> linkNames = List.of();
 
@@ -74,12 +73,21 @@ public class GbaLinkClient implements ClientModInitializer {
 			}
 		});
 		ClientPlayNetworking.registerGlobalReceiver(Payloads.SaveAck.TYPE, (p, ctx) -> onSaveAck(p));
+		ClientPlayNetworking.registerGlobalReceiver(Payloads.NetplayStart.TYPE, (p, ctx) -> {
+			EmulatorSession s = current;
+			if (s != null) s.onNetplayStart(new NetplayEngine.Params(p.sessionId(), p.index(), p.count(), List.copyOf(p.names()), p.epoch(), p.tzOffset(), p.delay()));
+		});
+		// netplay_input / netplay_hash / netplay_snapshot are taken on the network thread by ClientNetplayFastPathMixin;
+		// these receivers only run if that mixin is absent (they must be registered for the payload types to be handled)
+		ClientPlayNetworking.registerGlobalReceiver(Payloads.NetplayInputS2C.TYPE, (p, ctx) -> fastNetplayInput(p));
+		ClientPlayNetworking.registerGlobalReceiver(Payloads.NetplayHashS2C.TYPE, (p, ctx) -> fastNetplayHash(p));
+		ClientPlayNetworking.registerGlobalReceiver(Payloads.NetplaySnapshotS2C.TYPE, (p, ctx) -> fastNetplaySnapshot(p));
 		ClientPlayNetworking.registerGlobalReceiver(Payloads.LinkState.TYPE, (p, ctx) -> {
 			linkIndex = p.playerIndex();
 			linkCount = p.playerCount();
 			linkNames = List.copyOf(p.names());
 			EmulatorSession s = current;
-			if (s != null) s.onLinkState(linkIndex, linkCount, linkNames);
+			if (s != null) s.onLinkState(linkIndex, linkCount, linkNames, p.mode());
 			if (p.playerCount() >= 2) {
 				ctx.client().gui.hud.setOverlayMessage(Component.literal("Link cable: P" + (p.playerIndex() + 1) + " of "
 					+ p.playerCount() + " (" + String.join(", ", p.names()) + ")"), false);
@@ -97,7 +105,7 @@ public class GbaLinkClient implements ClientModInitializer {
 			serverProtocol = 0;
 			CrtClient.reset();
 			if (ClientPlayNetworking.canSend(Payloads.Hello.TYPE)) {
-				ClientPlayNetworking.send(new Payloads.Hello(Payloads.PROTOCOL));
+				ClientPlayNetworking.send(new Payloads.Hello(Payloads.PROTOCOL, netplayCaps()));
 			}
 		});
 		ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
@@ -126,6 +134,32 @@ public class GbaLinkClient implements ClientModInitializer {
 			}
 			return InteractionResult.PASS;
 		});
+	}
+
+	/** Network thread (or game thread): netplay messages go straight to the session's controller. */
+	public static void fastNetplayInput(Payloads.NetplayInputS2C p) {
+		EmulatorSession s = current;
+		if (s != null) s.netplay().onInput(p.sessionId(), p.from(), p.firstFrame(), p.recs(), p.sendMs(), p.echo());
+	}
+
+	public static void fastNetplayHash(Payloads.NetplayHashS2C p) {
+		EmulatorSession s = current;
+		if (s != null) s.netplay().onHash(p.sessionId(), p.from(), p.gen(), p.frame(), p.hash());
+	}
+
+	public static void fastNetplaySnapshot(Payloads.NetplaySnapshotS2C p) {
+		EmulatorSession s = current;
+		if (s != null) s.netplay().onSnapshot(p.sessionId(), p.from(), p.gen(), p.frame(), p.offset(), p.total(), p.bytes());
+	}
+
+	/** CAP_NETPLAY if the native library has the virtual RTC (API 2). Loads the library, which is cheap and cached. */
+	private static int netplayCaps() {
+		try {
+			GbaNative n = GbaNative.get(FabricLoader.getInstance().getGameDir());
+			return n != null && n.supportsNetplay() ? Payloads.Hello.CAP_NETPLAY : 0;
+		} catch (Throwable t) {
+			return 0;
+		}
 	}
 
 	private static void openBurnScreen(Minecraft client) {
@@ -247,32 +281,11 @@ public class GbaLinkClient implements ClientModInitializer {
 			s.onSaveAck(p.revision(), p.accepted());
 			return;
 		}
-		byte[] imp = pendingImport; // ack of an import: keep a local copy too
-		if (imp != null && p.accepted() && SaveRules.revision(imp).equals(p.revision())) {
-			pendingImport = null;
-			try {
-				SaveStore.writeAtomic(RomLibrary.savesDir().resolve(p.pakId() + ".sav"), imp);
-			} catch (IOException ignored) {
-			}
-		}
 	}
 
-	/** Whether the server can take an imported save (protocol 2+). */
-	public static boolean serverSupportsImport() {
-		return serverProtocol >= 2;
-	}
-
-	/** Burn {@code rom}; if {@code importSave} is non-null, upload it right after as the new pak's first save. */
-	public static void burn(RomLibrary.Rom rom, byte[] importSave) {
+	/** Burn {@code rom} onto the held Blank Game Pak. */
+	public static void burn(RomLibrary.Rom rom) {
 		ClientPlayNetworking.send(new Payloads.Burn(rom.sha1(), rom.name(), rom.code()));
-		if (importSave == null) return;
-		pendingImport = importSave;
-		int off = 0;
-		do {
-			int len = Math.min(Payloads.MAX_CHUNK, importSave.length - off);
-			ClientPlayNetworking.send(new Payloads.ImportChunk(off, importSave.length, java.util.Arrays.copyOfRange(importSave, off, off + len)));
-			off += len;
-		} while (off < importSave.length);
 	}
 
 	private static void closeOnServer(UUID pakId, Payloads.CrtOpen crt) {

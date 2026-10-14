@@ -1,7 +1,7 @@
 # gbacore - native GBA emulator library
 
 `libgbacore` wraps **mGBA 0.10.5** (GBA core only, built statically into the library) behind the
-C ABI in `include/gbacore.h` (contract: `../SPEC.md`, API version 1) and adds a serial-level
+C ABI in `include/gbacore.h` (contract: `../SPEC.md`, API version 2) and adds a serial-level
 **link cable** that works across processes: the host only forwards opaque byte messages.
 
 ## Build
@@ -68,6 +68,26 @@ test 102 without it).
   In-flight link transfers are not part of a state: loading a state or resetting aborts them.
 * Logging from mGBA is discarded.
 
+## Virtual RTC (API version 2)
+
+`gba_set_rtc(core, epoch_seconds, mode)`: mode `GBA_RTC_WALL` (0, default) leaves mGBA's wall clock and the local time
+zone in charge. Mode `GBA_RTC_VIRTUAL` (1) switches the generic RTC source to `RTC_FAKE_EPOCH`: the cartridge clock reads
+`epoch_seconds` (UNIX time) at the moment of the call and then advances with *emulated* time (`frameCounter` x 280896
+cycles at 16777216 Hz), so two cores that execute the same frames see the same time on every machine. Call it after
+`gba_load_rom` and before `gba_load_save` / `gba_load_state`; loading a state keeps the virtual clock where it was (the
+state carries its own frame counter).
+
+mGBA converts the clock to the cartridge's BCD registers (and computes the save-file time offset) with `localtime_r` /
+`mktime`, i.e. in the process time zone. While at least one core is in virtual mode the shim therefore sets `TZ=UTC` for the
+process (reference counted behind a spin lock, restored when the last such core leaves virtual mode or is destroyed; Java
+keeps its own zone data). Returning to `GBA_RTC_WALL` recomputes the save-time offset in the local zone so the in-game
+clock continues instead of jumping by the UTC offset.
+
+Determinism helpers for netplay: loading a state (and `gba_load_rom` / `gba_reset`) sets the link bookkeeping that is not part
+of a state to fixed values (`ranSinceDone`, pending/settle flags, sequence numbers, message queue), and `gba_save_state`
+zeroes its output buffer first so states can be hashed. Version 1 libraries lack `gba_set_rtc`; the Java binding still
+loads them (no netplay).
+
 ## Link cable
 
 Implemented as a custom `GBASIODriver` for Normal-8, Normal-32 and Multiplayer (2-4 players),
@@ -129,6 +149,10 @@ configure) and feed the "all ready" bit.
   ordering in both directions, 3-player daisy chain, IRQ completion, Multiplayer with 2/3/4 players
   (SIOMULTI0-3, ID bits, IRQ), mode mismatch, unplug while the master waits (all three modes),
   unplug of a busy child, re-plug.
+* `rtc`: virtual RTC reading, advancing with frames, kept across `gba_load_state`, time zone forced to UTC while virtual
+  and restored afterwards.
+* `determinism`: two cores linked through the zero-latency fixed-order router that netplay uses, fixed inputs, virtual RTC;
+  pins the CRC32 of both complete states at frames 100/1000/1500 (the same values the Java check prints on every CI platform).
 * `dylib`: `dlopen`s the real shared library, checks that only `gba_*` is visible and runs a ROM.
 * `exports`: `nm` check.
 
@@ -143,6 +167,6 @@ the exact final screens so regressions are detected.
 * Normal mode with 3-4 players uses the daisy chain data flow but its SO/SI handshake bits are not
   emulated beyond SI = 0. UART, JOY bus, GBA-Player and Wireless Adapter modes are not supported
   (mGBA's default dummy drivers apply).
-* Link state is not serialized in save states.
+* Link state is not serialized in save states (loading a state resets it to fixed values, see above).
 * No GBA BIOS file is used (HLE), so BIOS-timing-sensitive titles/tests (jsmolka `bios.gba`) differ.
 * mGBA 0.10.5 ignores unaligned 16-bit stores to SRAM (hardware quirk, fails jsmolka save test 6).

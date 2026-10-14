@@ -60,12 +60,12 @@ class SaveRulesTest {
 
 	@Test
 	void importAcceptance() {
-		assertNull(SaveRules.importRejection(true, 1000, false, 32768));
-		assertNotNull(SaveRules.importRejection(false, 1000, false, 32768));           // no pak was just burned
-		assertNotNull(SaveRules.importRejection(true, SaveRules.IMPORT_WINDOW_MS + 1, false, 32768)); // too late
-		assertNotNull(SaveRules.importRejection(true, 1000, true, 32768));             // pak already has a save
-		assertNotNull(SaveRules.importRejection(true, 1000, false, 1000));             // garbage size
-		assertNotNull(SaveRules.importRejection(true, 1000, false, 600 * 1024));
+		assertNull(SaveRules.importRejection(true, 32768));
+		assertNull(SaveRules.importRejection(true, 32768 + 16));                     // RTC footer
+		assertNotNull(SaveRules.importRejection(false, 32768));                      // no open session for that pak
+		assertNotNull(SaveRules.importRejection(true, 1000));                        // garbage size
+		assertNotNull(SaveRules.importRejection(true, 600 * 1024));                  // too large
+		assertNotNull(SaveRules.importRejection(true, 0));                           // empty
 	}
 
 	@Test

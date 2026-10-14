@@ -66,7 +66,7 @@ int main(int argc, char** argv) {
 	int do_save = argc > 4 && strcmp(argv[4], "save") == 0;
 	const char* want_color = argc > 5 ? argv[5] : NULL; /* RRGGBB hex of one of the two main colours */
 
-	CHECK(gba_api_version() == 1, "api version");
+	CHECK(gba_api_version() == 2, "api version");
 	gba_core* c = gba_create();
 	CHECK(c != NULL, "create");
 	CHECK(gba_load_rom(c, rom) == 0, "load_rom %s", rom);

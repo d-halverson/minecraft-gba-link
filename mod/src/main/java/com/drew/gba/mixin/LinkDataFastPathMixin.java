@@ -20,6 +20,12 @@ public abstract class LinkDataFastPathMixin {
 		if (packet.payload() instanceof Payloads.LinkDataC2S d) {
 			GbaServer.fastRelay((ServerGamePacketListenerImpl) (Object) this, d);
 			ci.cancel();
+		} else if (packet.payload() instanceof Payloads.NetplayInputC2S d) {
+			GbaServer.fastNetplayInput((ServerGamePacketListenerImpl) (Object) this, d);
+			ci.cancel();
+		} else if (packet.payload() instanceof Payloads.NetplayHashC2S d) {
+			GbaServer.fastNetplayHash((ServerGamePacketListenerImpl) (Object) this, d);
+			ci.cancel();
 		} else if (packet.payload() instanceof Payloads.CrtStreamC2S s) {
 			com.drew.gba.server.CrtServer.fastStream((ServerGamePacketListenerImpl) (Object) this, s);
 			ci.cancel();

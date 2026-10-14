@@ -12,9 +12,6 @@ import java.util.List;
 /** Lists the ROMs in the local library; picking one burns it onto the held Blank Game Pak. */
 public final class RomPickerScreen extends Screen {
 	private int perPage = 7;
-	private String importName;
-	private byte[] importBytes;
-	private String notice = "";
 	private List<RomLibrary.Rom> roms = List.of();
 	private int page;
 
@@ -53,20 +50,11 @@ public final class RomPickerScreen extends Screen {
 		addRenderableWidget(Button.builder(Component.literal("Cancel"), b -> onClose())
 			.bounds(x + w / 2 - 40, by, 80, 20).build());
 		addRenderableWidget(Button.builder(Component.literal("Open ROMs folder"), b -> RomLibrary.openFolder(RomLibrary.romsDir()))
-			.bounds(x, by + 24, w / 2 - 2, 20).build());
-		String imp = importName == null ? "Burn with existing save..." : "Save: " + importName + " (change)";
-		addRenderableWidget(Button.builder(Component.literal(imp), b -> minecraft.gui.setScreen(new SavePickerScreen(this, (n, d) -> {
-			importName = n;
-			importBytes = d;
-		}))).bounds(x + w / 2 + 2, by + 24, w - w / 2 - 2, 20).build());
+			.bounds(x, by + 24, w, 20).build());
 	}
 
 	private void burn(RomLibrary.Rom r) {
-		if (importBytes != null && !GbaLinkClient.serverSupportsImport()) {
-			notice = "This server's GBA Link mod can't import saves - ask the admin to update it";
-			return;
-		}
-		GbaLinkClient.burn(r, importBytes);
+		GbaLinkClient.burn(r);
 		onClose();
 	}
 
@@ -79,10 +67,8 @@ public final class RomPickerScreen extends Screen {
 			g.centeredText(font, "Put .gba files in .minecraft/gbalink/roms/ and reopen.", width / 2, 64, 0xFFCCCCCC);
 			g.centeredText(font, "Click \"Open ROMs folder\" below to find it.", width / 2, 78, 0xFFCCCCCC);
 		} else {
-			g.centeredText(font, importName == null ? "Hold a Blank Game Pak, then pick a game."
-				: "Hold a Blank Game Pak, then pick a game. It will start with " + importName + ".", width / 2, 26, 0xFFAAAAAA);
+			g.centeredText(font, "Hold a Blank Game Pak, then pick a game.", width / 2, 26, 0xFFAAAAAA);
 		}
-		if (!notice.isEmpty()) g.centeredText(font, notice, width / 2, height - 14, 0xFFFF8888);
 	}
 
 	@Override

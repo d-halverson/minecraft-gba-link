@@ -1,5 +1,7 @@
 package com.drew.gba.client.crt;
 
+import com.drew.gba.client.emu.LineFeeder;
+
 import javax.sound.sampled.AudioFormat;
 import javax.sound.sampled.AudioSystem;
 import javax.sound.sampled.DataLine;
@@ -7,11 +9,13 @@ import javax.sound.sampled.SourceDataLine;
 
 /**
  * Spectator audio: 16 kHz stereo line, separate from the emulator's. Opened once and never stopped or closed
- * (closing a line can hang on macOS, see AudioOut). Volume falls off with distance, pan follows the listener's facing.
+ * (closing a line can hang on macOS, see AudioOut); a {@link LineFeeder} fades out and feeds silence whenever no TV
+ * is audible, so the idle line never replays stale buffer contents. Volume falls off with distance, pan follows the listener's facing.
  */
 public final class CrtAudio {
 	public static final float SILENT_BEYOND = 24f;
 	private static volatile SourceDataLine line;
+	private static volatile LineFeeder feeder;
 	private static boolean tried;
 	private static byte[] bytes = new byte[0];
 
@@ -28,6 +32,8 @@ public final class CrtAudio {
 				SourceDataLine l = (SourceDataLine) AudioSystem.getLine(new DataLine.Info(SourceDataLine.class, fmt, buf));
 				l.open(fmt, buf);
 				l.start();
+				feeder = LineFeeder.forLine(l, 16000);
+				LineFeeder.startTicking(feeder);
 				line = l;
 			} catch (Exception | Error e) {
 				line = null; // silent
@@ -55,7 +61,8 @@ public final class CrtAudio {
 	/** Queue mono samples. {@code master} is Minecraft's master volume (0..1). Drops data when the line is backed up. */
 	public static void play(short[] mono, int n, double distance, double pan, float master) {
 		SourceDataLine l = line;
-		if (l == null || n <= 0) return;
+		LineFeeder fd = feeder;
+		if (l == null || fd == null || n <= 0) return;
 		float att = attenuation(distance);
 		if (att <= 0f || master <= 0f) return;
 		int queued = l.getBufferSize() - l.available();
@@ -71,7 +78,6 @@ public final class CrtAudio {
 			bytes[i * 4 + 2] = (byte) sr;
 			bytes[i * 4 + 3] = (byte) (sr >> 8);
 		}
-		int len = Math.min(need, l.available() & ~3);
-		if (len > 0) l.write(bytes, 0, len);
+		fd.write(bytes, need);
 	}
 }

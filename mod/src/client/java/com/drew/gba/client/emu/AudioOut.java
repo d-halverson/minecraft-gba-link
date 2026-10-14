@@ -12,12 +12,17 @@ import javax.sound.sampled.SourceDataLine;
  * Stopping/closing a line is not safe on macOS: {@code DirectAudioDevice.nStop} was observed to block forever
  * while holding the mixer lock, which then froze every later {@code open()} (the next game session would
  * never produce a frame). A session therefore only stops writing when it ends.
+ *
+ * A line nobody feeds underruns and (on Windows especially) replays stale buffer contents, which sounds like flickers
+ * while paused. {@link LineFeeder} therefore fades the audio out and keeps the open line filled with silence whenever
+ * no session is writing, and fades back in (about 10 ms) when one resumes.
  */
 final class AudioOut implements AutoCloseable {
 	private static SourceDataLine shared;
+	private static LineFeeder sharedFeeder;
 	private static boolean tried;
 
-	private volatile SourceDataLine line;
+	private volatile LineFeeder line;
 	private byte[] bytes = new byte[0];
 	volatile float volume = 1f;
 
@@ -28,8 +33,8 @@ final class AudioOut implements AutoCloseable {
 		line = sharedLine();
 	}
 
-	private static synchronized SourceDataLine sharedLine() {
-		if (tried) return shared;
+	private static synchronized LineFeeder sharedLine() {
+		if (tried) return sharedFeeder;
 		tried = true;
 		try {
 			AudioFormat fmt = new AudioFormat(GbaNative.AUDIO_RATE, 16, 2, true, false);
@@ -39,10 +44,13 @@ final class AudioOut implements AutoCloseable {
 			l.open(fmt, bufBytes);
 			l.start();
 			shared = l;
+			sharedFeeder = LineFeeder.forLine(l, GbaNative.AUDIO_RATE);
+			LineFeeder.startTicking(sharedFeeder);
 		} catch (Exception | Error e) {
 			shared = null; // run silently
+			sharedFeeder = null;
 		}
-		return shared;
+		return sharedFeeder;
 	}
 
 	boolean available() {
@@ -51,7 +59,7 @@ final class AudioOut implements AutoCloseable {
 
 	/** Queue interleaved stereo samples; excess beyond the free buffer space is dropped. */
 	void write(short[] samples, int frames) {
-		SourceDataLine l = line;
+		LineFeeder l = line;
 		if (l == null || frames <= 0) return;
 		int n = frames * 4;
 		if (bytes.length < n) bytes = new byte[n];
@@ -62,9 +70,7 @@ final class AudioOut implements AutoCloseable {
 			bytes[i * 2] = (byte) s;
 			bytes[i * 2 + 1] = (byte) (s >> 8);
 		}
-		int free = l.available() & ~3;
-		int len = Math.min(n, free);
-		if (len > 0) l.write(bytes, 0, len);
+		l.write(bytes, n); // fades in after a pause; drops what does not fit
 	}
 
 	/** Detach from the shared line (the line itself stays open, see class comment). */
