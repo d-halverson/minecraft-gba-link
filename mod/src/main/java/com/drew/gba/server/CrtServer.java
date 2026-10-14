@@ -71,6 +71,9 @@ public final class CrtServer {
 		final double x, y, z;
 		final float yaw;
 		Map<UUID, Integer> viewerState = new HashMap<>();
+		/** Viewers over the video cap that are still close enough to hear the TV (audio is not capped). */
+		java.util.Set<UUID> audioOnly = new java.util.HashSet<>();
+		volatile int volume = 100; // TV volume: the playing player's GBA volume
 		final TokenBucket bucket = new TokenBucket(256 * 1024, 1024 * 1024);
 		final AtomicLong lastKeyframe = new AtomicLong(System.nanoTime() - 1_000_000_000L);
 		final AtomicLong bytes = new AtomicLong();
@@ -90,7 +93,7 @@ public final class CrtServer {
 
 	/** Immutable routing for the Netty thread. */
 	private record Relay(UUID crtId, ServerGamePacketListenerImpl streamer, List<ServerGamePacketListenerImpl> viewers,
-			TokenBucket bucket, AtomicLong lastKeyframe, AtomicLong bytes) {}
+			List<ServerGamePacketListenerImpl> audioOnly, TokenBucket bucket, AtomicLong lastKeyframe, AtomicLong bytes) {}
 
 	private static volatile Map<UUID, Relay> relays = Map.of();
 
@@ -301,6 +304,7 @@ public final class CrtServer {
 		for (UUID v : l.viewerState.keySet()) sendView(v, l, Payloads.VIEW_NONE);
 		if (tellStreamer) sendView(l.player, l, Payloads.VIEW_NONE);
 		l.viewerState = new HashMap<>();
+		l.audioOnly = new java.util.HashSet<>();
 		rebuildRelays();
 		LOG.info("CRT {} stopped", l.crtId);
 	}
@@ -362,17 +366,22 @@ public final class CrtServer {
 		Map<UUID, Integer> next = new HashMap<>();
 		for (UUID v : sel.viewers()) next.put(v, Payloads.VIEW_PLAYING);
 		for (UUID v : sel.limited()) next.put(v, Payloads.VIEW_LIMIT);
+		java.util.Set<UUID> audioNext = new java.util.HashSet<>();
+		double audioRange = cfg.effectiveAudioDistance();
+		for (CrtViewers.Candidate<UUID> c : cands) if (sel.limited().contains(c.id()) && c.distance() <= audioRange) audioNext.add(c.id());
 		boolean newViewer = false;
 		for (Map.Entry<UUID, Integer> en : next.entrySet()) {
 			Integer prev = l.viewerState.get(en.getKey());
 			if (prev == null || !prev.equals(en.getValue())) {
 				sendView(en.getKey(), l, en.getValue());
+				sendVolume(en.getKey(), l);
 				if (en.getValue() == Payloads.VIEW_PLAYING) newViewer = true;
 			}
 		}
 		for (UUID old : l.viewerState.keySet()) if (!next.containsKey(old)) sendView(old, l, Payloads.VIEW_NONE);
-		boolean changed = !next.equals(l.viewerState);
+		boolean changed = !next.equals(l.viewerState) || !audioNext.equals(l.audioOnly);
 		l.viewerState = next;
+		l.audioOnly = audioNext;
 		if (changed) rebuildRelays();
 		if (newViewer) requestKeyframe(l.lastKeyframe, relays.get(l.player));
 	}
@@ -388,9 +397,27 @@ public final class CrtServer {
 				ServerPlayer v = server.getPlayerList().getPlayer(e.getKey());
 				if (v != null) to.add(v.connection);
 			}
-			m.put(l.player, new Relay(l.crtId, streamer.connection, List.copyOf(to), l.bucket, l.lastKeyframe, l.bytes));
+			List<ServerGamePacketListenerImpl> ao = new ArrayList<>();
+			for (UUID id : l.audioOnly) {
+				ServerPlayer v = server.getPlayerList().getPlayer(id);
+				if (v != null) ao.add(v.connection);
+			}
+			m.put(l.player, new Relay(l.crtId, streamer.connection, List.copyOf(to), List.copyOf(ao), l.bucket, l.lastKeyframe, l.bytes));
 		}
 		relays = Map.copyOf(m);
+	}
+
+	/** The player at the TV changed their volume: remember it and tell everyone who hears the TV. */
+	void onVolume(ServerPlayer p, UUID crtId, int percent) {
+		Live l = live.get(crtId);
+		if (l == null || !l.player.equals(p.getUUID())) return;
+		l.volume = Math.max(0, Math.min(100, percent));
+		for (UUID v : l.viewerState.keySet()) sendVolume(v, l);
+	}
+
+	private void sendVolume(UUID to, Live l) {
+		ServerPlayer sp = server.getPlayerList().getPlayer(to);
+		if (sp != null && ServerPlayNetworking.canSend(sp, Payloads.CrtVolume.TYPE)) ServerPlayNetworking.send(sp, new Payloads.CrtVolume(l.crtId, l.volume));
 	}
 
 	void onNeedKeyframe(ServerPlayer p, UUID crtId) {
@@ -423,8 +450,10 @@ public final class CrtServer {
 			return;
 		}
 		r.bytes().addAndGet(b.length);
-		if (r.viewers().isEmpty()) return;
+		boolean audio = d.kind() == 1 && !r.audioOnly().isEmpty();
+		if (r.viewers().isEmpty() && !audio) return;
 		Packet<?> out = ServerPlayNetworking.createClientboundPacket(new Payloads.CrtStreamS2C(d.crtId(), d.seq(), d.kind(), d.part(), d.parts(), b));
 		for (ServerGamePacketListenerImpl to : r.viewers()) to.send(out);
+		if (audio) for (ServerGamePacketListenerImpl to : r.audioOnly()) to.send(out); // over the video cap, but close enough to hear
 	}
 }

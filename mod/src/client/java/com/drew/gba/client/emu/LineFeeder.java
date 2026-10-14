@@ -3,6 +3,7 @@ package com.drew.gba.client.emu;
 import javax.sound.sampled.SourceDataLine;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.DoubleSupplier;
 import java.util.function.LongSupplier;
 
 /**
@@ -19,6 +20,9 @@ import java.util.function.LongSupplier;
  *       from the last sample to zero and then keeps the line topped up with zeros, so it never underruns and stale
  *       data is never replayed.</li>
  * </ul>
+ *
+ * The player's GBA volume is applied here too, as a linear gain that glides to its target over about
+ * {@link #GAIN_RAMP_MS} (per sample, full scale), so turning the volume wheel never clicks.
  *
  * Everything here is plain 16-bit little-endian stereo PCM, no Minecraft classes; the line is behind {@link Sink}
  * so the behaviour can be tested with a fake device.
@@ -42,11 +46,17 @@ public final class LineFeeder {
 	public static final double KEEP_QUEUED_MS = 15;
 	/** While silent the line is kept filled to this level with zeros. */
 	public static final double SILENCE_FILL_MS = 60;
+	/** A gain change from silence to full (or back) takes this long; smaller changes proportionally less. */
+	public static final double GAIN_RAMP_MS = 30;
 
 	private final Sink sink;
 	private final int rate;
 	private final LongSupplier nanos;
 	private final int fadeFrames;
+	private final double gainStep;       // gain change per frame while gliding to a new target
+	private volatile double stallMs = STALL_MS;
+	private volatile DoubleSupplier gainSource = () -> 1.0;
+	private double curGain = -1;         // the gain of the last frame written (-1: nothing written yet)
 
 	private boolean everWritten;
 	private boolean silent = true;   // zeros are being fed (or nothing was ever fed)
@@ -62,6 +72,17 @@ public final class LineFeeder {
 		this.rate = sampleRate;
 		this.nanos = nanos;
 		this.fadeFrames = Math.max(1, (int) (sampleRate * FADE_MS / 1000));
+		this.gainStep = 1.0 / Math.max(1, sampleRate * GAIN_RAMP_MS / 1000);
+	}
+
+	/** How long without a write counts as "the producer stopped" (default {@link #STALL_MS}; slower producers like the CRT stream need more). */
+	public void setStallMs(double ms) {
+		this.stallMs = ms;
+	}
+
+	/** Where the (0..1) linear gain comes from; read on every {@link #write}. Default: constant 1. */
+	public void setGainSource(DoubleSupplier s) {
+		this.gainSource = s;
 	}
 
 	public static LineFeeder forLine(SourceDataLine line, int sampleRate) {
@@ -70,6 +91,47 @@ public final class LineFeeder {
 			@Override public int available() { return line.available(); }
 			@Override public int write(byte[] b, int off, int len) { return line.write(b, off, len); }
 		}, sampleRate, System::nanoTime);
+	}
+
+	/** The line for the real device; with {@code withVolume} the output is scaled by the player's GBA volume. */
+	public static LineFeeder forLineWithVolume(SourceDataLine line, int sampleRate, String name) {
+		LineFeeder f = forLine(line, sampleRate);
+		if (System.getProperty("gbalink.audiolog") != null) f = new LineFeeder(new RmsLogSink(f.sink, name), sampleRate, System::nanoTime); // dev: log what reaches the device
+		f.setGainSource(com.drew.gba.client.ClientConfig::gbaGain);
+		return f;
+	}
+
+	/** Dev (-Dgbalink.audiolog): logs the RMS (16-bit scale) of everything handed to the device, once per second. */
+	private static final class RmsLogSink implements Sink {
+		private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger("gbalink-audio");
+		private final Sink in;
+		private final String name;
+		private double sumSq;
+		private long n, windowStart = System.nanoTime();
+
+		RmsLogSink(Sink in, String name) {
+			this.in = in;
+			this.name = name;
+		}
+
+		@Override public int bufferSize() { return in.bufferSize(); }
+		@Override public int available() { return in.available(); }
+		@Override public int write(byte[] b, int off, int len) {
+			int w = in.write(b, off, len);
+			for (int i = off; i + 1 < off + w; i += 2) {
+				int v = (short) ((b[i] & 0xFF) | (b[i + 1] << 8));
+				sumSq += (double) v * v;
+				n++;
+			}
+			long now = System.nanoTime();
+			if (now - windowStart >= 1_000_000_000L) {
+				LOG.info("[AUDIO-RMS] {} line rms={} samples={}", name, Math.round(n == 0 ? 0 : Math.sqrt(sumSq / n)), n);
+				sumSq = 0;
+				n = 0;
+				windowStart = now;
+			}
+			return w;
+		}
 	}
 
 	private int msToBytes(double ms) {
@@ -86,6 +148,16 @@ public final class LineFeeder {
 	 * (fade-in). Whatever does not fit is dropped; it never blocks.
 	 */
 	public synchronized void write(byte[] pcm, int len) {
+		write(pcm, len, true);
+	}
+
+	/** Bytes waiting in the line (for producers that limit their own latency). */
+	public synchronized int queuedBytes() {
+		return queued();
+	}
+
+	/** As {@link #write(byte[], int)}; {@code volume} false bypasses the gain source (the TV level is not the listener's knob). */
+	public synchronized void write(byte[] pcm, int len, boolean volume) {
 		len &= ~3;
 		if (len <= 0) return;
 		long now = nanos.getAsLong();
@@ -107,6 +179,7 @@ public final class LineFeeder {
 		}
 		int fit = Math.min(len, sink.available() & ~3);
 		if (fit <= 0) return;
+		applyGain(pcm, fit / FRAME_BYTES, volume);
 		if (fadeInLeft > 0) {
 			int frames = fit / FRAME_BYTES;
 			for (int f = 0; f < frames && fadeInLeft > 0; f++, fadeInLeft--) {
@@ -122,11 +195,25 @@ public final class LineFeeder {
 		}
 	}
 
+	/** Scale the first {@code frames} frames by the volume gain, gliding from the previous gain to the current target. */
+	private void applyGain(byte[] pcm, int frames, boolean volume) {
+		double target = volume ? Math.max(0.0, Math.min(1.0, gainSource.getAsDouble())) : 1.0;
+		if (curGain < 0) curGain = target; // the first audio ever: no glide (the fade-in covers the start)
+		if (curGain == 1.0 && target == 1.0) return;
+		double g = curGain;
+		for (int f = 0; f < frames; f++) {
+			if (g < target) g = Math.min(target, g + gainStep);
+			else if (g > target) g = Math.max(target, g - gainStep);
+			if (g != 1.0) scale(pcm, f * FRAME_BYTES, (float) g);
+		}
+		curGain = g;
+	}
+
 	/** Call every ~5 ms from a timer. Cheap when the producer is running. */
 	public synchronized void tick() {
 		if (!everWritten) return; // nobody ever played: leave the device alone
 		long idleNanos = nanos.getAsLong() - lastWriteNanos;
-		boolean stalled = idleNanos > (long) (STALL_MS * 1_000_000);
+		boolean stalled = idleNanos > (long) (stallMs * 1_000_000);
 		if (!silent) {
 			if (!stalled || queued() > msToBytes(RAMP_WHEN_QUEUED_MS)) return;
 			// producer stopped and the real audio is about to run out: fade the last sample to zero, then silence

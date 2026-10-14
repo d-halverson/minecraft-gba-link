@@ -119,7 +119,8 @@ public final class EmulatorSession implements Runnable {
 	public void release(int bit) { held &= ~(1 << bit); }
 	public void releaseAll() { held = 0; }
 	public int heldMask() { return held; }
-	public void setVolume(float v) { audio.volume = v; }
+	/** True (with the netplay toast) if an import must not start now; the screens check this before opening the picker. */
+	public boolean importBlocked() { return netplayBlocked("Import"); }
 
 	public boolean isFinished() { return finished; }
 	public String error() { return error; }
@@ -288,6 +289,24 @@ public final class EmulatorSession implements Runnable {
 		} catch (RuntimeException e) {
 			// diagnostics must never disturb emulation
 		}
+	}
+
+	/**
+	 * One short phrase for the cable HUD while this session is open: {@code netplay · 60 fps · delay 3f},
+	 * {@code classic link (different games)}, {@code connecting…}, or "" when the cable is not (yet) effectively linked.
+	 */
+	public String linkHudState() {
+		if (netplayActive) {
+			String st = netplay.statsLine();
+			java.util.regex.Matcher fps = java.util.regex.Pattern.compile("([0-9.]+) fps").matcher(st);
+			java.util.regex.Matcher delay = java.util.regex.Pattern.compile("delay (\\d+)f").matcher(st);
+			if (!fps.find()) return "connecting\u2026";
+			return "netplay \u00b7 " + Math.round(Double.parseDouble(fps.group(1))) + " fps" + (delay.find() ? " \u00b7 delay " + delay.group(1) + "f" : "");
+		}
+		if (netplayExpected) return "connecting\u2026";
+		if (link.timedOut()) return "partner not responding";
+		if (link.count() < 2) return "";
+		return lastLinkMode == Payloads.LinkState.MODE_NETPLAY ? "linked" : "classic link (different games)";
 	}
 
 	public String linkStatus() {

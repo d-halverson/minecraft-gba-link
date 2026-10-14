@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.4.2
+
+* **Volume wheels** on the GBA bezel: **GBA** volume (game sound, saved per player in
+  `config/gbalink-client.properties`, independent of Minecraft's master volume) and **MC** volume (Minecraft's master
+  volume). Drag, scroll, or use `-`/`=` (GBA) and `[`/`]` (MC).
+* **CRT Options panel** (`O` or the Options button): the same controls as the GBA screen (save/load state, export/import
+  .sav, power switch, both volume wheels, Unlink, Leave). Hide it for the clean view.
+* **CRT sound for everyone nearby**: players with the mod hear a running TV in the world (full volume up to 4 blocks,
+  fading to silent at `crt_audio_distance`, default 24, with stereo pan), not only the 10 video viewers. The TV volume is
+  the playing player's GBA wheel, so the player and the audience hear the same level.
+* **Link status at a glance**: a corner indicator "Linked to X" (with the link state) whenever you are cabled, an
+  actionbar message when you link or unlink, and **Unlink** on the GBA screen, in the CRT panel and on the `U` key (works
+  anywhere; rebindable). Your partner sees "X unplugged the link cable."
+* Fix: CRT TV audio never played on macOS (a second sound line blocked); one shared line is used now.
+* **Fix: Pokemon Emerald "Communication error" in the Cable Club over netplay.** Netplay now links the simulated consoles
+  with mGBA's own multiplayer lockstep (`GBASIOLockstep`, the code behind mGBA's multiplayer windows) instead of the
+  0.4.0/0.4.1 hand-written link driver. A new native API 3 (`gba_group_create/add/run_frame/destroy`) steps all consoles on
+  one thread in a fixed order, so netplay stays bit-deterministic (CI hash check on every platform). Verified with a real
+  Emerald ROM: with the old driver both consoles end on "Communication error"; with lockstep both walk into the Trade Center.
+* Netplay between 0.4.2 and older clients is not possible (different simulation): they fall back to the classic link
+  (`CAP_NETPLAY_LOCKSTEP`). Classic (different ROMs) mode is unchanged.
+* Save states of consoles in a lockstep group carry the lockstep state (128 byte trailer); mGBA's own states do not store
+  write-only registers (SIOMLT_SEND) or the live SIOCNT/RCNT, which the trailer now carries.
+* New tests: `group` (Normal/Multiplayer 2 to 4 consoles, a Gen 3 style timer-IRQ link ROM, pokesim, state reload equivalence),
+  `emerald_harness` (manual, real ROM, never committed). `determinism` and `NetplayHashCheck` use groups.
+
 ## 0.4.1
 
 * When a link falls back to the classic mode (players have different ROMs), a clear message says so:

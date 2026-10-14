@@ -5,6 +5,7 @@ import java.util.UUID;
 import com.drew.gba.client.emu.EmulatorSession;
 import com.drew.gba.client.crt.CrtClient;
 import com.drew.gba.client.ui.CrtScreen;
+import com.drew.gba.client.ui.SessionControls;
 import com.drew.gba.client.ui.GbaScreen;
 import com.drew.gba.client.ui.RomPickerScreen;
 import com.drew.gba.net.Payloads;
@@ -71,7 +72,7 @@ public final class AutoTest {
 		this.dir = mc.gameDirectory.toPath().resolve("autotest");
 		String sp = System.getProperty("gbalink.autotest.sync");
 		this.sync = sp == null ? dir.resolve("sync") : Path.of(sp);
-		this.romName = System.getProperty("gbalink.autotest.rom", mode.startsWith("crt") && !mode.equals("crtmodel") ? "shades.gba" : mode.equals("qol") ? "counter.gba" : mode.equals("solo") ? "sram.gba" : mode.startsWith("np") || mode.startsWith("nc") ? "link_pokesim.gba" : "link_n32_" + (mode.equals("A") ? "master" : "slave") + ".gba");
+		this.romName = System.getProperty("gbalink.autotest.rom", mode.startsWith("ui") ? "tone.gba" : mode.startsWith("crt") && !mode.equals("crtmodel") ? "shades.gba" : mode.equals("qol") ? "counter.gba" : mode.equals("solo") ? "sram.gba" : mode.startsWith("np") || mode.startsWith("nc") ? "link_pokesim.gba" : "link_n32_" + (mode.equals("A") ? "master" : "slave") + ".gba");
 	}
 
 	public static void start() {
@@ -298,15 +299,29 @@ public final class AutoTest {
 		waitFor("burn screen", 5000, () -> mc.gui.screen() instanceof RomPickerScreen);
 		String label = romName.substring(0, romName.length() - 4);
 		sleep(1000); // let the window settle (a resize re-inits the screen and replaces its widgets)
-		Boolean clicked = main(() -> {
-			for (var c : mc.gui.screen().children()) {
-				if (c instanceof Button b && b.getMessage().getString().startsWith(label)) {
-					return mc.gui.screen().mouseClicked(new MouseButtonEvent(b.getX() + b.getWidth() / 2.0,
-						b.getY() + b.getHeight() / 2.0, new MouseButtonInfo(1, 0)), false);
+		Boolean clicked = null;
+		for (int page = 0; page < 8 && clicked == null; page++) { // the picker lists 6 ROMs per page
+			clicked = main(() -> {
+				for (var c : mc.gui.screen().children()) {
+					if (c instanceof Button b && b.getMessage().getString().startsWith(label)) {
+						return mc.gui.screen().mouseClicked(new MouseButtonEvent(b.getX() + b.getWidth() / 2.0,
+							b.getY() + b.getHeight() / 2.0, new MouseButtonInfo(1, 0)), false);
+					}
 				}
+				return null;
+			});
+			if (clicked == null) {
+				main(() -> {
+					for (var c : mc.gui.screen().children()) {
+						if (c instanceof Button b && b.getMessage().getString().equals(">")) {
+							mc.gui.screen().mouseClicked(new MouseButtonEvent(b.getX() + 3.0, b.getY() + 3.0, new MouseButtonInfo(1, 0)), false);
+							return;
+						}
+					}
+				});
+				sleep(500);
 			}
-			return null;
-		});
+		}
 		if (clicked == null) fail("rom button '" + label + "' not on the burn screen (is the rom in gbalink/roms?)");
 		log("clicked burn button; screen now " + main(() -> String.valueOf(mc.gui.screen())));
 		waitFor("burned pak", 8000, () -> GbaItems.is(mc.player.getInventory().getItem(blank), GbaItems.PAK));
@@ -375,6 +390,7 @@ public final class AutoTest {
 			else if (mode.equals("crtA")) crtPlayer(false);
 			else if (mode.equals("crtA2")) crtPlayer(true);
 			else if (mode.equals("crtB") || mode.equals("crtC")) crtViewer();
+			else if (mode.equals("uiA") || mode.equals("uiB")) ui042();
 			else if (mode.equals("qol")) qol();
 			else if (mode.equals("solo")) solo();
 			else if (mode.startsWith("np") || mode.startsWith("nc")) netplayScenario();
@@ -390,6 +406,281 @@ public final class AutoTest {
 			sleep(1500);
 			log("quitting client");
 			mc.submit(() -> mc.stop());
+		}
+	}
+
+
+	// ------------------------------------------------------------------ v0.4.2 UI: volume wheels, CRT options panel, link HUD, Unlink, CRT sound
+
+	private void uiShot(String name) {
+		shot("ui_" + name);
+		copyEvidence(mc.gameDirectory.toPath().resolve("screenshots").resolve("ui_" + name + ".png"), "v042ui_" + name + ".png");
+	}
+
+	private void setGuiSize(int w, int h, int scale) {
+		main(() -> {
+			mc.options.guiScale().set(scale);
+			try { mc.getWindow().setWindowed(w, h); } catch (Throwable t) { log("setWindowed failed: " + t); }
+			mc.resizeGui();
+		});
+		sleep(1200);
+		log("window " + main(() -> mc.getWindow().getWidth() + "x" + mc.getWindow().getHeight() + " gui " + mc.getWindow().getGuiScaledWidth() + "x" + mc.getWindow().getGuiScaledHeight()));
+	}
+
+	private void mark(String s) {
+		LOG.info("[AUDIO-MARK] {} {}", mode, s);
+		log("MARK " + s);
+	}
+
+	/** Two clients: A (cable, GBA, CRT) and B (GBA, listener). */
+	private void ui042() {
+		boolean a = mode.equals("uiA");
+		String other = a ? "B" : "A";
+		String me = a ? "A" : "B";
+		giveAndWait(GbaItems.GBA);
+		giveAndWait(GbaItems.BLANK_PAK);
+		if (a) { giveAndWait(GbaItems.CABLE); giveAndWait(GbaItems.CRT); giveAndWait(GbaItems.BLANK_PAK); }
+		burn();
+		insert();
+		if (a) burn(); // the second pak (still in the hotbar) goes into the CRT later
+		command("time set noon");
+		command("weather clear");
+		command("difficulty peaceful");
+		signal(me + ".ready");
+		awaitSignal(other + ".ready", 240000);
+
+		// ---- 1. GBA screen: wheels at normal size, hover readout, drag, small sizes (A only)
+		if (a) {
+			hideGui(false);
+			openGba();
+			sleep(1500);
+			clearClutter();
+			uiShot("gba_normal");
+			GbaScreen gs = gbaScreen();
+			SessionControls sc = main(gs::controls);
+			int[] kc = main(() -> new int[] {sc.gba.centerX(), sc.gba.wheelCenterY(), sc.mc.centerX()});
+			main(() -> sc.debugPointer(kc[0], kc[1]));
+			sleep(400);
+			uiShot("gba_hover_gba_knob");
+			// drag the GBA wheel to 40% with the real mouse handlers
+			double gx = kc[0], gy = kc[1];
+			main(() -> gs.mouseClicked(new MouseButtonEvent(gx, gy, new MouseButtonInfo(InputConstants.MOUSE_BUTTON_LEFT, 0)), false));
+			main(() -> gs.mouseDragged(new MouseButtonEvent(gx, gy, new MouseButtonInfo(InputConstants.MOUSE_BUTTON_LEFT, 0)), -40, 0));
+			sleep(400);
+			check(ClientConfig.gbaVolume() == 40, "dragging the GBA wheel 40 px left sets 40% (" + ClientConfig.gbaVolume() + ")");
+			uiShot("gba_dragging");
+			main(() -> gs.mouseReleased(new MouseButtonEvent(gx, gy, new MouseButtonInfo(InputConstants.MOUSE_BUTTON_LEFT, 0))));
+			main(() -> sc.debugPointer(kc[2], kc[1]));
+			main(() -> gs.mouseScrolled(kc[2], kc[1], 0, -1));
+			float mcBefore = main(() -> mc.options.getSoundSourceVolume(net.minecraft.sounds.SoundSource.MASTER));
+			main(() -> gs.mouseScrolled(kc[2], kc[1], 0, 1));
+			float mcAfter = main(() -> mc.options.getSoundSourceVolume(net.minecraft.sounds.SoundSource.MASTER));
+			check(Math.abs(mcAfter - mcBefore - 0.05f) < 0.011f, "scrolling the MC wheel changes Minecraft's master volume (" + mcBefore + " -> " + mcAfter + ")");
+			sleep(400);
+			uiShot("gba_hover_mc_knob");
+			// keys
+			main(() -> gs.keyPressed(new KeyEvent(InputConstants.KEY_EQUALS, 46, 0)));
+			check(ClientConfig.gbaVolume() == 45, "= raises the GBA volume by 5 (" + ClientConfig.gbaVolume() + ")");
+			main(() -> gs.keyPressed(new KeyEvent(InputConstants.KEY_RBRACKET, 48, 0)));
+			main(() -> sc.debugPointer(-100, -100));
+			sleep(300);
+			main(() -> ClientConfig.setGbaVolume(100));
+			main(() -> mc.options.getSoundSourceOptionInstance(net.minecraft.sounds.SoundSource.MASTER).set(1.0));
+			// small sizes
+			setGuiSize(640, 360, 2);
+			uiShot("gba_small_640x360_gui2");
+			setGuiSize(480, 320, 2);
+			uiShot("gba_small_480x320_gui2");
+			setGuiSize(854, 480, 4);
+			uiShot("gba_gui4_854x480");
+			setGuiSize(1280, 720, 3);
+			main(() -> mc.options.guiScale().set(0));
+			setGuiSize(1000, 600, 0);
+			closeGba();
+		}
+		signal(me + ".gba_done");
+		awaitSignal(other + ".gba_done", 240000);
+
+		// ---- 2. cable: A links to B; HUD with no GBA open
+		if (a) {
+			command("tp @s TestB");
+			sleep(1500);
+			select(slotOf(GbaItems.CABLE));
+			AbstractClientPlayer target = main(() -> {
+				for (AbstractClientPlayer p : mc.level.players()) if (p != mc.player && p.getGameProfile().name().equals("TestB")) return p;
+				return null;
+			});
+			if (target == null) fail("TestB not visible");
+			main(() -> mc.gameMode.interact(mc.player, target, new EntityHitResult(target), InteractionHand.MAIN_HAND));
+			sleep(800);
+			signal("A.cabled");
+		}
+		awaitSignal("A.cabled", 60000);
+		waitFor("cable_state on the client", 10000, ClientCable::linked);
+		check(true, "cable_state received: linked to " + ClientCable.partnerText());
+		sleep(600);
+		uiShot("link_hud_" + mode + "_just_linked");   // the actionbar message is up
+		sleep(3500);
+		uiShot("link_hud_" + mode + "_idle");          // HUD only, no GBA open
+		check(main(() -> mc.gui.screen() == null), "no screen open, HUD indicator drawn");
+		signal(me + ".hud1");
+		awaitSignal(other + ".hud1", 60000);
+
+		// B opens its GBA; A (no screen) sees it
+		if (!a) {
+			openGba();
+			sleep(2500);
+			uiShot("link_gba_waiting_B");
+			signal("B.open");
+			awaitSignal("A.hudwaiting", 60000);
+			closeGba();
+		} else {
+			awaitSignal("B.open", 60000);
+			sleep(2000);
+			uiShot("link_hud_A_partner_has_gba_open");
+			signal("A.hudwaiting");
+		}
+		sleep(1500);
+		signal(me + ".hud2");
+		awaitSignal(other + ".hud2", 60000);
+
+		// F3 and potion effect placement (A)
+		if (a) {
+			main(() -> mc.debugEntries.toggleDebugOverlay());
+			sleep(600);
+			uiShot("link_hud_A_with_f3");
+			main(() -> mc.debugEntries.toggleDebugOverlay());
+			command("effect give @s minecraft:speed 30 0 true");
+			command("effect give @s minecraft:night_vision 30 0 true");
+			sleep(1500);
+			uiShot("link_hud_A_with_effects");
+			hideGui(true);
+			sleep(300);
+			uiShot("link_hud_A_f1_hidden");
+			hideGui(false);
+			command("effect clear @s");
+		}
+		signal(me + ".hud3");
+		awaitSignal(other + ".hud3", 60000);
+
+		// ---- 3. CRT: A plays the tone on a TV, B listens at 2, 3, 12, 30 blocks
+		BlockPos at = main(() -> mc.player.blockPosition());
+		double gy, tx, tz;
+		if (a) {
+			gy = at.getY();
+			tx = at.getX() + 6.0; tz = at.getZ() + 0.5;
+			try { Files.createDirectories(sync); Files.writeString(crtPosFile(), tx + " " + gy + " " + tz); } catch (IOException e) { throw new Fail("pos " + e); }
+			command("kill @e[type=!minecraft:player]");
+			tp(tx + 0.5, gy, tz - 3.2, 0f, 8f);
+			select(slotOf(GbaItems.CRT));
+			BlockPos floor = new BlockPos(at.getX() + 6, at.getY() - 1, at.getZ());
+			main(() -> mc.gameMode.useItemOn(mc.player, InteractionHand.MAIN_HAND,
+				new net.minecraft.world.phys.BlockHitResult(new net.minecraft.world.phys.Vec3(floor.getX() + 0.5, gy, floor.getZ() + 0.5), Direction.UP, floor, false)));
+			sleep(1500);
+			waitFor("CRT entity", 5000, () -> findCrtEntityNow() != null);
+			select(slotOf(GbaItems.PAK));
+			main(() -> mc.player.connection.send(new ServerboundPlayerActionPacket(
+				ServerboundPlayerActionPacket.Action.SWAP_ITEM_WITH_OFFHAND, BlockPos.ZERO, Direction.DOWN, 0)));
+			waitFor("pak in off hand", 5000, () -> GbaItems.is(mc.player.getItemInHand(InteractionHand.OFF_HAND), GbaItems.PAK));
+			interactCrt(true);
+			waitFor("pak inserted", 5000, () -> mc.player.getItemInHand(InteractionHand.OFF_HAND).isEmpty());
+			tp(tx, gy, tz - 3.6, 0f, 8f);
+			interactCrt(false);
+			waitFor("CRT screen with a live session", 20000, () -> mc.gui.screen() instanceof CrtScreen && GbaLinkClient.currentSession() != null);
+			waitFor("first frame", 10000, () -> GbaLinkClient.currentSession().frames.seq() > 5);
+			sleep(2500);
+			clearClutter();
+			CrtScreen cs = main(() -> mc.gui.screen() instanceof CrtScreen c ? c : null);
+			main(() -> cs.setPanelOpen(false));
+			sleep(400);
+			uiShot("crt_clean");
+			int[] ob = main(cs::optionsButtonCenter);
+			main(() -> cs.mouseClicked(new MouseButtonEvent(ob[0], ob[1], new MouseButtonInfo(InputConstants.MOUSE_BUTTON_LEFT, 0)), false));
+			check(main(cs::panelOpen), "clicking Options opens the panel");
+			sleep(500);
+			uiShot("crt_panel_open");
+			SessionControls sc = main(cs::controls);
+			main(() -> sc.debugPointer(sc.gba.centerX(), sc.gba.wheelCenterY()));
+			sleep(300);
+			uiShot("crt_panel_hover_knob");
+			int[] pw = main(() -> sc.powerSwitchCenter());
+			main(() -> sc.debugPointer(pw[0], pw[1]));
+			sleep(300);
+			uiShot("crt_panel_hover_power");
+			main(() -> sc.debugPointer(-100, -100));
+			// panel keys: GBA keys still work while it is open
+			main(() -> cs.keyPressed(new KeyEvent(InputConstants.KEY_RIGHT, 262, 0)));
+			check((main(() -> GbaLinkClient.currentSession().heldMask()) & (1 << 4)) != 0, "GBA keys keep working while the panel is open");
+			main(() -> cs.keyReleased(new KeyEvent(InputConstants.KEY_RIGHT, 262, 0)));
+			main(() -> cs.keyPressed(new KeyEvent(InputConstants.KEY_O, 18, 0)));
+			check(!main(cs::panelOpen), "O hides the panel");
+			sleep(400);
+			uiShot("crt_panel_hidden_again");
+			main(() -> cs.keyPressed(new KeyEvent(InputConstants.KEY_O, 18, 0)));
+			sleep(300);
+			// the Unlink button is in the panel while cabled
+			uiShot("crt_panel_linked_unlink_button");
+			sleep(1000);
+			// Unlink through the panel's real button
+			Boolean clicked = main(() -> {
+				for (var c : mc.gui.screen().children()) {
+					if (c instanceof net.minecraft.client.gui.components.Button bt && bt.getMessage().getString().startsWith("Unlink")) {
+						return mc.gui.screen().mouseClicked(new MouseButtonEvent(bt.getX() + 3.0, bt.getY() + 3.0, new MouseButtonInfo(InputConstants.MOUSE_BUTTON_LEFT, 0)), false);
+					}
+				}
+				return null;
+			});
+			check(clicked != null, "the panel has an Unlink button while cabled");
+			sleep(300);
+			uiShot("unlink_A_after_click");
+			signal("A.unlinked");
+			waitFor("cable_state says unlinked", 8000, () -> !ClientCable.linked());
+			sleep(1500);
+			uiShot("unlink_A_panel_without_button");
+			signal("A.tv");
+			awaitSignal("B.stagesdone", 240000);
+			main(() -> ClientConfig.setGbaVolume(50)); // the TV volume = the player's GBA knob
+			mark("player GBA volume now 50");
+			sleep(2000);
+			signal("A.vol50");
+			awaitSignal("B.done", 240000);
+			CrtScreen cs2 = main(() -> mc.gui.screen() instanceof CrtScreen c ? c : null);
+			main(() -> cs2.keyPressed(new KeyEvent(InputConstants.KEY_ESCAPE, 256, 0)));
+			waitFor("screen closed", 5000, () -> mc.gui.screen() == null);
+			sleep(1000);
+		} else {
+			awaitSignal("A.unlinked", 240000);
+			sleep(900);
+			uiShot("unlink_B_partner_message");
+			sleep(3000);
+			uiShot("unlink_B_hud_gone");
+			check(!ClientCable.linked(), "B no longer shows a cable after A unplugged");
+			awaitSignal("A.tv", 240000);
+			main(() -> mc.options.getSoundSourceOptionInstance(net.minecraft.sounds.SoundSource.MASTER).set(1.0)); // listener master volume 100%
+			double[] pos;
+			try {
+				String[] ps = Files.readString(crtPosFile()).trim().split(" ");
+				pos = new double[] {Double.parseDouble(ps[0]), Double.parseDouble(ps[1]), Double.parseDouble(ps[2])};
+			} catch (IOException e) { throw new Fail("crt pos " + e); }
+			double bx = pos[0] + 5.0; // off to the side of A (A stands in front of the TV)
+			for (double d : new double[] {2, 3, 12, 30}) {
+				tp(bx - 5.0 + 0.0, pos[1], pos[2] - d, 0f, 0f);
+				mark("listener at " + d + " blocks (GBA volume at the TV = 100)");
+				sleep(7000);
+				if (d == 3) { clearClutter(); uiShot("crt_listener_3_blocks"); }
+			}
+			signal("B.stagesdone");
+			awaitSignal("A.vol50", 60000);
+			for (double d : new double[] {2, 3}) {
+				tp(bx - 5.0, pos[1], pos[2] - d, 0f, 0f);
+				mark("listener at " + d + " blocks (TV volume 50)");
+				sleep(7000);
+			}
+			main(() -> ClientConfig.setGbaVolume(20)); // a spectator's own knob does not change the TV
+			mark("listener's own GBA knob set to 20");
+			sleep(7000);
+			main(() -> ClientConfig.setGbaVolume(100));
+			signal("B.done");
 		}
 	}
 

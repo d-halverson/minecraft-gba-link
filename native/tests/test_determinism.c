@@ -1,5 +1,5 @@
-/* Determinism check: two cores linked through the zero-latency, fixed-order router used by input-sync netplay
- * (NetplaySim in the mod; same algorithm), fixed ROM, scripted inputs, virtual RTC. Prints a CRC32 over both complete
+/* Determinism check: two cores linked with mGBA's lockstep inside one gba_group, as input-sync netplay does
+ * (NetplaySim in the mod), fixed ROM, scripted inputs, virtual RTC. Prints a CRC32 over both complete
  * save states at fixed frames. The expected values were produced by the Java NetplaySim on macOS x86_64 and must be
  * identical on every platform and architecture (CI also runs the Java version on Linux, Windows and macOS arm64). */
 #include "gbacore.h"
@@ -33,60 +33,14 @@ static int script(int player, long long frame) {
 }
 
 #define N 2
-#define MAXQ 4096
-struct Msg { int from; uint8_t d[GBA_LINK_MSG_MAX]; size_t n; };
-static struct Msg inbox[N][MAXQ];
-static int qn[N];
 static gba_core* c[N];
-
-static void pump(int i) {
-	uint8_t m[GBA_LINK_MSG_MAX];
-	size_t n;
-	while ((n = gba_link_poll_outgoing(c[i], m, sizeof(m))) > 0) {
-		for (int j = 0; j < N; ++j) {
-			if (j == i) continue;
-			struct Msg* q = &inbox[j][qn[j]++];
-			q->from = i;
-			q->n = n;
-			memcpy(q->d, m, n);
-		}
-	}
-}
-static void deliver(int i) {
-	for (int k = 0; k < qn[i]; ++k) gba_link_deliver(c[i], inbox[i][k].from, inbox[i][k].d, inbox[i][k].n);
-	qn[i] = 0;
-	pump(i);
-}
-static void run_child(void) {
-	deliver(1);
-	if (gba_run_frame(c[1]) != GBA_RUN_FRAME_DONE) { printf("child blocked\n"); exit(1); }
-	pump(1);
-	deliver(0);
-}
+static gba_group* grp;
 
 static void tick(long long f) {
-	gba_set_keys(c[0], script(0, f));
-	gba_set_keys(c[1], script(1, f));
-	int ran_child = 0, stalls = 0;
-	for (;;) {
-		int r = gba_run_frame(c[0]);
-		pump(0);
-		if (r == GBA_RUN_ERROR) { printf("core error\n"); exit(1); }
-		if (r == GBA_RUN_FRAME_DONE) break;
-		int fresh = qn[1] > 0;
-		deliver(1);
-		deliver(0);
-		if (!fresh) {
-			if (++stalls > 64) { printf("stuck\n"); exit(1); }
-			run_child();
-			ran_child = 1;
-		}
-	}
-	if (!ran_child) run_child();
+	for (int i = 0; i < N; ++i) gba_set_keys(c[i], script(i, f));
+	if (gba_group_run_frame(grp) != GBA_RUN_FRAME_DONE) { printf("group error\n"); exit(1); }
 	int16_t pcm[4096];
-	while (gba_read_audio(c[0], pcm, 2048) > 0) { }
-	while (gba_read_audio(c[1], pcm, 2048) > 0) { }
-	for (int i = 0; i < 8 && (qn[0] || qn[1]); ++i) { deliver(0); deliver(1); }
+	for (int i = 0; i < N; ++i) while (gba_read_audio(c[i], pcm, 2048) > 0) { }
 }
 
 static uint32_t hash_all(void) {
@@ -110,12 +64,11 @@ int main(int argc, char** argv) {
 		c[i] = gba_create();
 		if (!c[i] || gba_load_rom(c[i], path) != 0) { printf("cannot load %s\n", path); return 2; }
 		gba_set_rtc(c[i], 1760000000, GBA_RTC_VIRTUAL);
-		gba_link_configure(c[i], i, N);
 	}
-	pump(0);
-	pump(1);
+	grp = gba_group_create(N);
+	for (int i = 0; i < N; ++i) if (gba_group_add(grp, c[i]) != 0) { printf("group add failed\n"); return 2; }
 	static const struct { int frame; uint32_t expect; } checks[] = {
-		{ 100, 0xfd818a81u }, { 1000, 0x8d648ff2u }, { 1500, 0x4fc1da04u } };
+		{ 100, 0x7767ecd7u }, { 1000, 0x22acf324u }, { 1500, 0x59acab12u } };
 	int next = 0, fail = 0;
 	for (long long f = 0; f < 1500; ++f) {
 		tick(f);
@@ -126,6 +79,7 @@ int main(int argc, char** argv) {
 			++next;
 		}
 	}
+	gba_group_destroy(grp);
 	for (int i = 0; i < N; ++i) gba_destroy(c[i]);
 	return fail;
 }

@@ -141,6 +141,11 @@ public final class GbaCore implements AutoCloseable {
 		try { return (int) n.setRtc.invokeExact(core, epochSeconds, mode) == 0; } catch (Throwable t) { throw wrap(t); }
 	}
 
+	/** Native handle for gba_group_add (package use: GbaGroup). */
+	public GbaNative natives() { return n; }
+
+	MemorySegment handle() { return core; }
+
 	public void linkConfigure(int index, int count) {
 		try { n.linkConfigure.invokeExact(core, index, count); } catch (Throwable t) { throw wrap(t); }
 	}

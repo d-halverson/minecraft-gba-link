@@ -236,14 +236,18 @@ public final class NetplayEngine implements AutoCloseable {
 				if (!c.setRtc(epoch, GbaNative.RTC_VIRTUAL)) throw new IllegalStateException("virtual RTC unavailable");
 				if (saves[k].length > 0 && c.loadSave(saves[k]) < 0) ls.log("core rejected the save of P" + (i + 1));
 				if (!c.loadState(states[k])) throw new IllegalStateException("could not load the state of P" + (i + 1));
-				c.linkConfigure(i, n);
 			}
 			for (GbaCore c : cs) if (c == null) throw new IllegalStateException("incomplete snapshot");
 		} catch (RuntimeException e) {
 			for (GbaCore c : cs) if (c != null) c.close();
 			throw e;
 		}
-		return new NetplaySim(cs, me);
+		try {
+			return new NetplaySim(cs, me);
+		} catch (RuntimeException e) {
+			for (GbaCore c : cs) c.close();
+			throw e;
+		}
 	}
 
 	private void startSim() {

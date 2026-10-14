@@ -29,6 +29,8 @@ public final class Payloads {
 	/** {@code caps} (appended in 0.4.0, 0 if absent): bit 0 = this client can run input-sync netplay (native API 2). */
 	public record Hello(int protocol, int caps) implements CustomPacketPayload {
 		public static final int CAP_NETPLAY = 1;
+		/** 0.4.2: netplay simulated with mGBA lockstep groups (native API 3); not compatible with the 0.4.0/0.4.1 simulation (bit 0 only). */
+		public static final int CAP_NETPLAY_LOCKSTEP = 2;
 		public static final Type<Hello> TYPE = mkType("hello");
 		public static final StreamCodec<RegistryFriendlyByteBuf, Hello> CODEC = StreamCodec.ofMember(
 			(v, b) -> { b.writeVarInt(v.protocol); b.writeVarInt(v.caps); },
@@ -132,6 +134,58 @@ public final class Payloads {
 				for (int i = 0; i < n; i++) names.add(b.readUtf(64));
 				return new LinkState(idx, cnt, names, b.isReadable() ? b.readVarInt() : MODE_CLASSIC);
 			});
+		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+	}
+
+	/**
+	 * S2C (optional, additive; only sent to clients that registered it): who is on this player's link cable, even when no
+	 * GBA is open. {@code myIndex} is -1 and {@code members} empty when not cabled. {@code open[i]} is true when member i
+	 * has a GBA (or CRT) running.
+	 */
+	public record CableState(int myIndex, List<String> members, List<Boolean> open) implements CustomPacketPayload {
+		public static final Type<CableState> TYPE = mkType("cable_state");
+		public static final StreamCodec<RegistryFriendlyByteBuf, CableState> CODEC = StreamCodec.ofMember(
+			(v, b) -> {
+				b.writeVarInt(v.myIndex);
+				b.writeVarInt(v.members.size());
+				for (int i = 0; i < v.members.size(); i++) { b.writeUtf(v.members.get(i), 64); b.writeBoolean(v.open.get(i)); }
+			},
+			b -> {
+				int idx = b.readVarInt(), n = b.readVarInt();
+				if (n < 0 || n > 8) throw new IllegalArgumentException("bad member count");
+				List<String> names = new ArrayList<>(n);
+				List<Boolean> open = new ArrayList<>(n);
+				for (int i = 0; i < n; i++) { names.add(b.readUtf(64)); open.add(b.readBoolean()); }
+				return new CableState(idx, names, open);
+			});
+		public static final CableState NONE = new CableState(-1, List.of(), List.of());
+		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+	}
+
+	/** C2S: "take me off the link cable" (same as /gba unlink). Empty. */
+	public record Unlink() implements CustomPacketPayload {
+		public static final Type<Unlink> TYPE = mkType("unlink");
+		public static final StreamCodec<RegistryFriendlyByteBuf, Unlink> CODEC = StreamCodec.ofMember((v, b) -> { }, b -> new Unlink());
+		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+	}
+
+	/**
+	 * The TV volume (0-100): the GBA-volume setting of the player at the CRT. C2S from that player (on start and on every
+	 * change); S2C relayed to everyone who can hear the TV, so the player and the audience hear the same level.
+	 * Optional and additive: clients without it just hear the TV at full level.
+	 */
+	public record CrtVolume(UUID crtId, int percent) implements CustomPacketPayload {
+		public static final Type<CrtVolume> TYPE = mkType("crt_volume");
+		public static final StreamCodec<RegistryFriendlyByteBuf, CrtVolume> CODEC = StreamCodec.ofMember(
+			(v, b) -> { b.writeUUID(v.crtId); b.writeVarInt(v.percent); }, b -> new CrtVolume(b.readUUID(), b.readVarInt()));
+		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+	}
+
+	/** S2C (optional): blocks within which a running CRT TV is audible (server setting crt_audio_distance). */
+	public record CrtAudioRange(int blocks) implements CustomPacketPayload {
+		public static final Type<CrtAudioRange> TYPE = mkType("crt_audio_range");
+		public static final StreamCodec<RegistryFriendlyByteBuf, CrtAudioRange> CODEC = StreamCodec.ofMember(
+			(v, b) -> b.writeVarInt(v.blocks), b -> new CrtAudioRange(b.readVarInt()));
 		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
 	}
 
@@ -342,6 +396,8 @@ public final class Payloads {
 		c2s.register(NetplayHashC2S.TYPE, NetplayHashC2S.CODEC);
 		c2s.register(NetplaySnapshotC2S.TYPE, NetplaySnapshotC2S.CODEC);
 		c2s.register(NetplayRestartC2S.TYPE, NetplayRestartC2S.CODEC);
+		c2s.register(Unlink.TYPE, Unlink.CODEC);
+		c2s.register(CrtVolume.TYPE, CrtVolume.CODEC);
 		var s2c = PayloadTypeRegistry.clientboundPlay();
 		s2c.register(Open.TYPE, Open.CODEC);
 		s2c.register(Welcome.TYPE, Welcome.CODEC);
@@ -356,5 +412,8 @@ public final class Payloads {
 		s2c.register(NetplayInputS2C.TYPE, NetplayInputS2C.CODEC);
 		s2c.register(NetplayHashS2C.TYPE, NetplayHashS2C.CODEC);
 		s2c.register(NetplaySnapshotS2C.TYPE, NetplaySnapshotS2C.CODEC);
+		s2c.register(CableState.TYPE, CableState.CODEC);
+		s2c.register(CrtVolume.TYPE, CrtVolume.CODEC);
+		s2c.register(CrtAudioRange.TYPE, CrtAudioRange.CODEC);
 	}
 }

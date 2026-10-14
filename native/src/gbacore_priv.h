@@ -12,4 +12,6 @@ int      gba_priv_link_waiting(gba_core* c);
 /* UNIX time the cartridge clock reports right now (the RTC source mGBA samples). */
 int64_t  gba_priv_rtc_unix(gba_core* c);
 
+int gba_priv_group_round(gba_group* g);
+
 #endif

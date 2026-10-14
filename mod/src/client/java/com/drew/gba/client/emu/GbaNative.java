@@ -27,7 +27,7 @@ import static java.lang.foreign.ValueLayout.JAVA_LONG;
 public final class GbaNative {
 	public static final int WIDTH = 240, HEIGHT = 160, AUDIO_RATE = 32768, LINK_MSG_MAX = 64;
 	public static final int RUN_FRAME_DONE = 0, RUN_LINK_WAIT = 1, RUN_ERROR = -1;
-	public static final int API_VERSION = 2, MIN_API_VERSION = 1, RTC_WALL = 0, RTC_VIRTUAL = 1;
+	public static final int API_VERSION = 3, MIN_API_VERSION = 1, RTC_WALL = 0, RTC_VIRTUAL = 1;
 
 	private static GbaNative instance;
 	private static String loadError;
@@ -37,6 +37,8 @@ public final class GbaNative {
 	final MethodHandle linkConfigure, linkPollOutgoing, linkDeliver;
 	/** gba_set_rtc (API 2); null for a version 1 library. */
 	final MethodHandle setRtc;
+	/** gba_group_* (API 3); null for older libraries. */
+	final MethodHandle groupCreate, groupAdd, groupRunFrame, groupDestroy;
 	final int version;
 
 	private GbaNative(SymbolLookup lib, int version) {
@@ -62,11 +64,15 @@ public final class GbaNative {
 		linkConfigure = h(l, lib, "gba_link_configure", FunctionDescriptor.ofVoid(ADDRESS, JAVA_INT, JAVA_INT));
 		linkPollOutgoing = h(l, lib, "gba_link_poll_outgoing", FunctionDescriptor.of(JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG));
 		linkDeliver = h(l, lib, "gba_link_deliver", FunctionDescriptor.ofVoid(ADDRESS, JAVA_INT, ADDRESS, JAVA_LONG));
+		groupCreate = version >= 3 ? h(l, lib, "gba_group_create", FunctionDescriptor.of(ADDRESS, JAVA_INT)) : null;
+		groupAdd = version >= 3 ? h(l, lib, "gba_group_add", FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS)) : null;
+		groupRunFrame = version >= 3 ? h(l, lib, "gba_group_run_frame", FunctionDescriptor.of(JAVA_INT, ADDRESS)) : null;
+		groupDestroy = version >= 3 ? h(l, lib, "gba_group_destroy", FunctionDescriptor.ofVoid(ADDRESS)) : null;
 		setRtc = version >= 2 ? h(l, lib, "gba_set_rtc", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG, JAVA_INT)) : null;
 	}
 
-	/** True if the library has the virtual RTC (API 2), which input-sync netplay needs. */
-	public boolean supportsNetplay() { return setRtc != null; }
+	/** True if the library has the virtual RTC and lockstep groups (API 3), which input-sync netplay needs. */
+	public boolean supportsNetplay() { return setRtc != null && groupCreate != null; }
 
 	private static MethodHandle h(Linker l, SymbolLookup lib, String name, FunctionDescriptor fd) {
 		MemorySegment sym = lib.find(name).orElseThrow(() -> new UnsatisfiedLinkError("missing symbol " + name));

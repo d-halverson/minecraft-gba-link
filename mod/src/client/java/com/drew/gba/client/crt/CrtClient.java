@@ -17,7 +17,6 @@ import net.minecraft.client.gui.Font;
 import net.minecraft.client.renderer.rendertype.RenderTypes;
 import net.minecraft.client.renderer.texture.DynamicTexture;
 import net.minecraft.resources.Identifier;
-import net.minecraft.sounds.SoundSource;
 import net.minecraft.util.FormattedCharSequence;
 import net.minecraft.util.LightCoordsUtil;
 import net.minecraft.world.phys.Vec3;
@@ -45,6 +44,7 @@ public final class CrtClient {
 		int state;
 		String player = "";
 		boolean own;
+		int volume = 100; // TV volume (the playing player's GBA volume), from crt_volume
 		EmulatorSession session; // own TV only
 		DynamicTexture tex;
 		Identifier texId;
@@ -133,9 +133,15 @@ public final class CrtClient {
 		CrtAudio.ensureOpen();
 	}
 
+	public static void onVolume(Payloads.CrtVolume v) {
+		Tv t = tvs.get(v.crtId());
+		if (t != null) t.volume = v.percent();
+	}
+
 	public static void onStream(Payloads.CrtStreamS2C p) {
 		Tv t = tvs.get(p.crtId());
-		if (t == null || t.own || t.state != Payloads.VIEW_PLAYING) return;
+		if (t == null || t.own || t.state == Payloads.VIEW_NONE) return;
+		if (t.state != Payloads.VIEW_PLAYING && p.kind() != 1) return; // over the video cap: sound only
 		t.bytes += p.bytes().length;
 		try {
 			if (p.kind() == 1) {
@@ -203,15 +209,26 @@ public final class CrtClient {
 		return null;
 	}
 
+	private static long audioLogAt;
+
+	/** Dev (-Dgbalink.audiolog): why audio was (not) played, once per second. */
+	private static void audioDbg(String what) {
+		if (System.getProperty("gbalink.audiolog") == null) return;
+		long now = System.currentTimeMillis();
+		if (now - audioLogAt < 1000) return;
+		audioLogAt = now;
+		LOG.info("[CRT-AUDIO] {}", what);
+	}
+
 	private static void playAudio(Tv t, byte[] data) {
 		Minecraft mc = Minecraft.getInstance();
-		if (mc.player == null || !CrtAudio.available()) return;
+		if (mc.player == null || !CrtAudio.available()) { audioDbg("no player or no audio line (available=" + CrtAudio.available() + ")"); return; }
 		// only the nearest watched TV is heard
 		double[] c = CrtGeometry.screenCenter(t.x, t.y, t.z, t.yaw);
 		Vec3 eye = mc.player.getEyePosition();
 		double d = Math.sqrt(sq(c[0] - eye.x) + sq(c[1] - eye.y) + sq(c[2] - eye.z));
 		for (Tv o : tvs.values()) {
-			if (o == t || o.own || o.state != Payloads.VIEW_PLAYING) continue;
+			if (o == t || o.own || o.state == Payloads.VIEW_NONE) continue;
 			double[] oc = CrtGeometry.screenCenter(o.x, o.y, o.z, o.yaw);
 			if (Math.sqrt(sq(oc[0] - eye.x) + sq(oc[1] - eye.y) + sq(oc[2] - eye.z)) < d) return;
 		}
@@ -223,7 +240,8 @@ public final class CrtClient {
 		double dx = c[0] - eye.x, dz = c[2] - eye.z, len = Math.max(0.001, Math.sqrt(dx * dx + dz * dz));
 		double pan = (dx * rx + dz * rz) / len;
 		if (len < 1.5) pan *= len / 1.5;
-		CrtAudio.play(t.pcm, n, d, pan, mc.options.getSoundSourceVolume(SoundSource.MASTER));
+		audioDbg("play n=" + n + " dist=" + String.format("%.1f", d) + " att=" + CrtAudio.attenuation(d) + " tvVolume=" + t.volume + " queued=" + CrtAudio.lastQueued + " skipped=" + CrtAudio.skipped + " written=" + CrtAudio.written + " master=" + mc.options.getSoundSourceVolume(net.minecraft.sounds.SoundSource.MASTER));
+		CrtAudio.play(t.pcm, n, d, pan, mc.options.getSoundSourceVolume(net.minecraft.sounds.SoundSource.MASTER), t.volume);
 	}
 
 	private static double sq(double v) { return v * v; }

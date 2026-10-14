@@ -1,9 +1,5 @@
 package com.drew.gba.client.emu;
 
-import javax.sound.sampled.AudioFormat;
-import javax.sound.sampled.AudioSystem;
-import javax.sound.sampled.DataLine;
-import javax.sound.sampled.SourceDataLine;
 
 /**
  * 32768 Hz 16-bit stereo output with a ~100 ms buffer. Never blocks the emulator thread on a full buffer.
@@ -18,39 +14,27 @@ import javax.sound.sampled.SourceDataLine;
  * no session is writing, and fades back in (about 10 ms) when one resumes.
  */
 final class AudioOut implements AutoCloseable {
-	private static SourceDataLine shared;
-	private static LineFeeder sharedFeeder;
-	private static boolean tried;
 
 	private volatile LineFeeder line;
+	private boolean counted;
 	private byte[] bytes = new byte[0];
-	volatile float volume = 1f;
 
 	AudioOut() {}
 
 	/** Attach to the shared line, opening it on first use. Call from the emulator thread (device calls can block). */
+	/** Number of open emulator sessions' outputs: while > 0 the CRT TVs stay quiet (see {@link AudioLines}). */
+	private static final java.util.concurrent.atomic.AtomicInteger ACTIVE = new java.util.concurrent.atomic.AtomicInteger();
+
+	public static boolean gameActive() { return ACTIVE.get() > 0; }
+
 	void open() {
 		line = sharedLine();
+		if (line != null && !counted) { counted = true; ACTIVE.incrementAndGet(); }
 	}
 
-	private static synchronized LineFeeder sharedLine() {
-		if (tried) return sharedFeeder;
-		tried = true;
-		try {
-			AudioFormat fmt = new AudioFormat(GbaNative.AUDIO_RATE, 16, 2, true, false);
-			int bufBytes = GbaNative.AUDIO_RATE / 10 * 4; // 100 ms
-			DataLine.Info info = new DataLine.Info(SourceDataLine.class, fmt, bufBytes);
-			SourceDataLine l = (SourceDataLine) AudioSystem.getLine(info);
-			l.open(fmt, bufBytes);
-			l.start();
-			shared = l;
-			sharedFeeder = LineFeeder.forLine(l, GbaNative.AUDIO_RATE);
-			LineFeeder.startTicking(sharedFeeder);
-		} catch (Exception | Error e) {
-			shared = null; // run silently
-			sharedFeeder = null;
-		}
-		return sharedFeeder;
+	private static LineFeeder sharedLine() {
+		AudioLines.open();
+		return AudioLines.feeder();
 	}
 
 	boolean available() {
@@ -63,19 +47,18 @@ final class AudioOut implements AutoCloseable {
 		if (l == null || frames <= 0) return;
 		int n = frames * 4;
 		if (bytes.length < n) bytes = new byte[n];
-		float v = Math.max(0f, Math.min(1f, volume));
-		v = v * v; // perceptual curve, roughly matches Minecraft's slider feel
-		for (int i = 0; i < frames * 2; i++) {
-			int s = (int) (samples[i] * v);
+		for (int i = 0; i < frames * 2; i++) { // full-scale samples; the player's GBA volume is applied inside the LineFeeder
+			int s = samples[i];
 			bytes[i * 2] = (byte) s;
 			bytes[i * 2 + 1] = (byte) (s >> 8);
 		}
-		l.write(bytes, n); // fades in after a pause; drops what does not fit
+		l.write(bytes, n); // volume, fade-in after a pause; drops what does not fit
 	}
 
 	/** Detach from the shared line (the line itself stays open, see class comment). */
 	@Override
 	public void close() {
+		if (counted) { counted = false; ACTIVE.decrementAndGet(); }
 		line = null;
 	}
 }

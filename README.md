@@ -196,6 +196,13 @@ back in your off hand.
 | Close (suspends the game) | `Esc` |
 | Power off | `P`, or click the power switch on the top edge of the GBA |
 | Export / import the save | buttons **Export .sav** / **Import .sav** under the screen |
+| GBA volume / Minecraft volume | `-` `=` / `[` `]`, or the two **volume wheels** on the bottom edge of the bezel (drag, or scroll over them) |
+| Unlink from the link cable | `U` (rebindable, works anywhere in game), or the **Unlink** button while cabled |
+
+**Volume.** The left wheel is the **GBA volume** (emulator and CRT sound, saved in `config/gbalink-client.properties`,
+independent of Minecraft's master volume); the right wheel is Minecraft's own master volume (the same setting as
+Options > Music & Sounds). While you are cabled, a small indicator in the top-right corner shows who you are linked to
+and the state of the link.
 
 **Suspend and power switch.** Closing the GBA screen (`Esc` or the Close button) does not turn the console
 off: it uploads your battery save to the server and writes a *suspend state* to
@@ -264,18 +271,23 @@ too (with the optional resource pack) but only players with the mod can play or 
   | **Export the save** | `E` (to `gbalink/exports/`) |
   | **Import a save** | `I` (picker, then confirmation; the game keeps running behind it) |
   | Power off | `P` |
+  | Options panel (save/load state, export/import, power switch, volume wheels, Unlink, Leave) | `O` or the **Options** button (top right) |
+  | Volume: GBA / Minecraft | `-` `=` / `[` `]` |
   | Leave (suspends the game like closing the GBA) | `Esc` |
 
   Saves, suspend states and link cables work the same. One player at a time per TV.
 * **Watch.** Modded players within 48 blocks see the live picture on the TV and hear it (low quality, about 8 KB/s).
-  The sound gets quieter with distance (silent beyond 24 blocks), pans left and right, and follows Minecraft's master
-  volume; only the nearest TV is heard. At most 10 players watch one TV (nearest first); others see
+  The TV has one volume, the **GBA volume wheel of the player at the TV**, so the player and the audience hear the same
+  level: full up to 4 blocks, quieter with distance, silent at `crt_audio_distance` (24 blocks), panned left and right,
+  and also scaled by each listener's own Minecraft master volume. Only the nearest TV is heard, and the audience does
+  not need to be among the 10 watchers to hear it. At most 10 players watch one TV (nearest first); others see
   "Viewer limit reached" on the screen. There is no input replay: spectators only see and hear.
 * **Settings** (server, `config/gbalink.properties`, created on first start):
 
   ```properties
   crt_max_viewers=10
   crt_view_distance=48
+  crt_audio_distance=24
   ```
 
 * **Bandwidth.** The player uploads the picture at 30 fps plus the sound: a still or slowly changing picture is

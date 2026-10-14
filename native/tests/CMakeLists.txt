@@ -44,6 +44,10 @@ gba_test_exe(test_link)
 add_dependencies(test_link link_roms)
 add_test(NAME link COMMAND test_link ${LINK_ROM_DIR})
 
+gba_test_exe(test_group)
+add_dependencies(test_group link_roms)
+add_test(NAME group COMMAND test_group ${LINK_ROM_DIR})
+
 gba_test_exe(test_determinism)
 add_dependencies(test_determinism link_roms)
 add_test(NAME determinism COMMAND test_determinism ${LINK_ROM_DIR})
@@ -62,3 +66,6 @@ elseif(UNIX)
   add_test(NAME exports
     COMMAND sh -c "test -z \"$(nm -D --defined-only $<TARGET_FILE:gbacore> | grep -v ' gba_')\"")
 endif()
+
+# Manual real-game harness (needs a ROM that is never committed): see emerald_harness.c
+gba_test_exe(emerald_harness)

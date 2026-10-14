@@ -38,6 +38,8 @@ import java.util.UUID;
 /** Client entrypoint: networking, keybind, and session lifecycle. */
 public class GbaLinkClient implements ClientModInitializer {
 	private static KeyMapping burnKey;
+	/** Unlink from the link cable, in game (screens with the GBA controls check it themselves). */
+	public static KeyMapping unlinkKey;
 
 	private static volatile EmulatorSession current;
 	/** A session that was closed but is still flushing its save / writing the suspend state. */
@@ -55,6 +57,7 @@ public class GbaLinkClient implements ClientModInitializer {
 
 	@Override
 	public void onInitializeClient() {
+		ClientConfig.init(FabricLoader.getInstance().getConfigDir());
 		RomLibrary.init(FabricLoader.getInstance().getGameDir());
 		RomLibrary.ensureFolders(); // gbalink/roms (+README) and gbalink/imports exist from the first start
 		// Dev-only end-to-end scenario driver. Completely inert (class never loaded) without the property.
@@ -71,8 +74,8 @@ public class GbaLinkClient implements ClientModInitializer {
 			lines.add(Component.literal("ROM ID: " + romId(pak.sha1())).withStyle(net.minecraft.ChatFormatting.DARK_GRAY));
 		});
 
-		burnKey = KeyMappingHelper.registerKeyMapping(new KeyMapping("key.gbalink.burn", InputConstants.KEY_G,
-			KeyMapping.Category.register(Identifier.fromNamespaceAndPath("gbalink", "main"))));
+		KeyMapping.Category keyCategory = KeyMapping.Category.register(Identifier.fromNamespaceAndPath("gbalink", "main"));
+		burnKey = KeyMappingHelper.registerKeyMapping(new KeyMapping("key.gbalink.burn", InputConstants.KEY_G, keyCategory));
 
 		ClientPlayNetworking.registerGlobalReceiver(Payloads.Open.TYPE, (p, ctx) -> onOpen(ctx.client(), p));
 		CrtClient.init();
@@ -110,6 +113,13 @@ public class GbaLinkClient implements ClientModInitializer {
 					+ p.playerCount() + " (" + String.join(", ", p.names()) + ")"), false);
 			}
 		});
+		ClientPlayNetworking.registerGlobalReceiver(Payloads.CrtVolume.TYPE, (p, ctx) -> CrtClient.onVolume(p));
+		ClientPlayNetworking.registerGlobalReceiver(Payloads.CableState.TYPE, (p, ctx) -> ClientCable.onState(p, ctx.client()));
+		ClientPlayNetworking.registerGlobalReceiver(Payloads.CrtAudioRange.TYPE, (p, ctx) -> com.drew.gba.client.crt.CrtAudio.setRange(p.blocks()));
+		net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry.attachElementAfter(
+			net.fabricmc.fabric.api.client.rendering.v1.hud.VanillaHudElements.MISC_OVERLAYS,
+			Identifier.fromNamespaceAndPath("gbalink", "cable_hud"), ClientCable::render);
+		unlinkKey = KeyMappingHelper.registerKeyMapping(new KeyMapping("key.gbalink.unlink", InputConstants.KEY_U, keyCategory));
 		ClientPlayNetworking.registerGlobalReceiver(Payloads.LinkDataS2C.TYPE, (p, ctx) -> {
 			EmulatorSession s = current;
 			if (s != null) s.onLinkData(p.fromIndex(), p.bytes());
@@ -120,12 +130,14 @@ public class GbaLinkClient implements ClientModInitializer {
 			linkCount = 0;
 			linkNames = List.of();
 			serverProtocol = 0;
+			ClientCable.reset();
 			CrtClient.reset();
 			if (ClientPlayNetworking.canSend(Payloads.Hello.TYPE)) {
 				ClientPlayNetworking.send(new Payloads.Hello(Payloads.PROTOCOL, netplayCaps()));
 			}
 		});
 		ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
+			ClientCable.reset();
 			CrtClient.reset();
 			EmulatorSession s = current;
 			if (s != null) {
@@ -136,6 +148,9 @@ public class GbaLinkClient implements ClientModInitializer {
 		});
 
 		ClientTickEvents.END_CLIENT_TICK.register(client -> {
+			while (unlinkKey.consumeClick()) {
+				if (client.player != null && client.gui.screen() == null) ClientCable.requestUnlink(client);
+			}
 			while (burnKey.consumeClick()) {
 				if (client.player == null || client.gui.screen() != null) continue;
 				openBurnScreen(client);
@@ -169,11 +184,11 @@ public class GbaLinkClient implements ClientModInitializer {
 		if (s != null) s.netplay().onSnapshot(p.sessionId(), p.from(), p.gen(), p.frame(), p.offset(), p.total(), p.bytes());
 	}
 
-	/** CAP_NETPLAY if the native library has the virtual RTC (API 2). Loads the library, which is cheap and cached. */
+	/** CAP_NETPLAY | CAP_NETPLAY_LOCKSTEP if the native library has lockstep groups (API 3). Loads the library, which is cheap and cached. */
 	private static int netplayCaps() {
 		try {
 			GbaNative n = GbaNative.get(FabricLoader.getInstance().getGameDir());
-			return n != null && n.supportsNetplay() ? Payloads.Hello.CAP_NETPLAY : 0;
+			return n != null && n.supportsNetplay() ? Payloads.Hello.CAP_NETPLAY | Payloads.Hello.CAP_NETPLAY_LOCKSTEP : 0;
 		} catch (Throwable t) {
 			return 0;
 		}

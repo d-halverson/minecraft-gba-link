@@ -92,6 +92,13 @@ void        gba_link_deliver(gba_core*, int from_player_index, const uint8_t* da
 #define GBA_RTC_WALL    0
 #define GBA_RTC_VIRTUAL 1
 int         gba_set_rtc(gba_core*, int64_t epoch_seconds, int mode);
+
+/* ---- Lockstep groups (API version 3, 0.4.2) ----
+   Cores of one process linked with mGBA's own GBASIOLockstep, stepped by the library on the calling thread in a fixed
+   order (deterministic, no messages, no LINK_WAIT). gba_group_create(n), gba_group_add(group, core) in player order
+   (ROM/save/state/RTC loaded first), gba_group_run_frame(group) = one frame for every core (each core's framebuffer
+   holds its completed frame), gba_group_destroy (cores get their classic driver back), gba_group_stalls (diagnostic).
+   A grouped core cannot gba_run_frame; its states carry a 128 byte lockstep trailer. See native/README.md. */
 ```
 
 Link semantics (implemented in the shim, invisible to Java): lockstep at the serial-transfer
@@ -126,7 +133,7 @@ for a client with a different protocol ("update the mod"), and a client treats a
 decoded tolerantly.
 
 - C2S `hello` {protocol, caps} — client announces the mod and its protocol. `caps` (new in 0.4.0, appended; 0 if absent)
-  is a bit set: bit 0 = the client can run netplay (native API version 2).
+  is a bit set: bit 0 = netplay with the 0.4.0/0.4.1 link driver (native API 2, no longer used for new sessions), bit 1 (`CAP_NETPLAY_LOCKSTEP`, 0.4.2) = the client can run netplay with mGBA lockstep groups (native API version 3).
 - S2C `welcome` {protocol} — server's protocol (new in 2; only sent if the client can receive it).
 - S2C `open` {pakId UUID, romSha1 hex, title, save bytes, revision} — open emulator for this pak.
   `revision` (new in 2, appended; "" if absent) = lowercase hex SHA-256 of `save` (a missing save is the hash
@@ -147,6 +154,12 @@ decoded tolerantly.
 - C2S `burn` {romSha1, title, gameCode} — turn a held Blank Game Pak into a Pak for this ROM.
 - S2C `link_state` {playerIndex, playerCount, names[], mode} — (count < 2 = unplugged). `mode` (new in 0.4.0, appended; 0 if
   absent): 0 = classic link, 1 = netplay (the classic cable stays unplugged, `netplay_start` follows).
+- S2C `cable_state` {myIndex, count, (name, open)[]} — **optional, additive (0.4.2)**: only sent to clients that registered
+  it (protocol 4 clients without it are unaffected). Who is on my link cable even with no GBA open (`open` = that member
+  has a GBA/CRT running); count 0 / myIndex -1 = not cabled. Sent on every room change or session change in the room, on
+  Hello (join) and after respawn. Drives the client's cable HUD indicator.
+- C2S `unlink` {} — **optional (0.4.2)**: take me off the cable (same as `/gba unlink`); the other members get the action
+  bar message "<name> unplugged the link cable."
 - C2S `link_data` {bytes ≤ 64} → server → S2C `link_data` {fromIndex, bytes} to other members.
 
 Revision guard: client-side suspend file `gbalink/suspend/<pakId>.state` = magic, version, revision, ROM SHA-1,
@@ -165,11 +178,11 @@ cartridges with a clock. `gba_get_save` resets the "dirty" flag.
 
 **Why.** The classic link (above) is lockstep: the master core blocks for a network round trip on every serial transfer
 (measured 17 fps at 50 ms RTT, 9 fps at 100 ms; the games' own link checks fail at 50 ms and more). Netplay instead
-makes every linked client simulate ALL linked consoles locally, connected through the link-message path with zero
-latency in one thread (`NetplaySim`); only controller inputs cross the network, with an adaptive input delay.
+makes every linked client simulate ALL linked consoles locally, in one thread, linked by mGBA's own lockstep (0.4.2: `gba_group_*`,
+`NetplaySim`; 0.4.0/0.4.1 used the custom link driver, which failed Pokemon Emerald's Cable Club with "Communication error"); only controller inputs cross the network, with an adaptive input delay.
 
 **Mode selection (server, `GbaServer.sendRoom`, `EffectiveLink.netplay`).** The effective link is the room's members with
-an open emulator session (GBA or CRT). Netplay when it has at least 2 players, every client announced `CAP_NETPLAY`, and
+an open emulator session (GBA or CRT). Netplay when it has at least 2 players, every client announced `CAP_NETPLAY_LOCKSTEP`, and
 every pak has the same ROM SHA-1 (remembered per open session). Otherwise the classic link ("Link (different games -
 slow mode)"). `link_state.mode` tells the clients which; for netplay the server then sends `netplay_start` to every member.
 Any change of the effective link (join, leave, close, cable break, distance, disconnect) sends a new `link_state` and, if
@@ -184,7 +197,7 @@ at least two players remain with the same ROM, a new `netplay_start` with a new 
    client falls back to a standalone game with a message.
 3. With all snapshots, the client creates FRESH cores for every console (its own too: link state outside the save state
    would otherwise differ between machines), loads ROM, `gba_set_rtc(epoch + tzOffset + frame*280896/16777216, VIRTUAL)`,
-   save, state, `gba_link_configure(i, count)`, and starts at netplay frame 0 (the virtual clock therefore shows the
+   save, state, joins them in a lockstep group (`gba_group_add`, player order), and starts at netplay frame 0 (the virtual clock therefore shows the
    server's local time).
 
 Snapshot blob (deflate level 1 of): `int 0x4E505331, int frame, int delay, byte n, n x { byte player, int stateLen, state,
@@ -272,10 +285,13 @@ packets (video packets over 30000 bytes are split into parts). The server relays
 routing snapshot, like `link_data`) to modded viewers within `crt_view_distance` (default 48 blocks, same dimension)
 up to `crt_max_viewers` (default 10) per CRT, nearest first, refreshed every second; extra viewers get a "viewer limit
 reached" overlay on the TV. A streamer is limited to ~1 MB/s (token bucket; excess packets are dropped and a keyframe
-is requested). Settings in `config/gbalink.properties` (`crt_max_viewers`, `crt_view_distance`, created with defaults).
+is requested). Settings in `config/gbalink.properties` (`crt_max_viewers`, `crt_view_distance`, `crt_audio_distance`, created with defaults).
 Viewers decode with `VideoDecoder`/`AudioDecoder`, draw onto the TV face (nearest filtering, full bright, subtle
-scanlines) and play the audio on their own 16 kHz stereo line (only the nearest watched TV is heard; linear fall-off,
-silent beyond 24 blocks; stereo pan from the listener's facing; scaled by the master volume). New viewers and decoder
+scanlines) and play the audio on their own 16 kHz stereo line (only the nearest watched TV is heard; full volume up to 4
+blocks, then a fall-off to silence at `crt_audio_distance` (default 24); stereo pan from the listener's facing; scaled by
+the TV volume (the playing player's GBA knob, `crt_volume`) and the listener's Minecraft master volume, not by the
+listener's own GBA knob). Audio is **not** limited by the viewer cap: players over `crt_max_viewers` still receive the
+audio packets (`kind` 1) while within `crt_audio_distance` (effective value never above `crt_view_distance`). New viewers and decoder
 errors → keyframe request to the streamer (server-side rate limit: at most one per 0.5 s per TV); the encoder also emits
 a keyframe every 60 frames. No input-replay spectating.
 
@@ -289,6 +305,10 @@ Payloads (new in 3):
 - S2C `crt_view` {crtId, state (0 none/idle, 1 playing, 2 limit reached), playerName, x, y, z, yaw} — viewers
   learn which TVs are live near them (x,y,z = bottom centre of the anchor cell); also sent when a stream ends. State 0
   sent to the player who is playing means the server ended their play.
+- C2S/S2C `crt_volume` {crtId, percent} — **optional (0.4.2)**: the TV volume = the playing player's GBA volume knob. The
+  player sends it on start and on every change; the server relays it to everyone who hears the TV (new viewers get it
+  with their first `crt_view`), so the player and the audience hear the same level. Missing = 100.
+- S2C `crt_audio_range` {blocks} — **optional (0.4.2)**: `crt_audio_distance`, where the TV becomes silent.
 - C2S `crt_close` {crtId} — the player leaves the TV (the pak `close` follows once the save is flushed).
 
 ### Stream codec contract (`com.drew.gba.stream`, pure Java, no Minecraft classes)

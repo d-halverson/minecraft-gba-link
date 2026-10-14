@@ -161,6 +161,7 @@ jobs:
           javac --release 25 -d out \
             $S/client/java/com/drew/gba/client/emu/GbaCore.java \
             $S/client/java/com/drew/gba/client/emu/GbaNative.java \
+            $S/client/java/com/drew/gba/client/emu/GbaGroup.java \
             $S/client/java/com/drew/gba/client/netplay/NetplaySim.java \
             $S/test/java/com/drew/gba/client/netplay/NetplayHashCheck.java
           java --enable-native-access=ALL-UNNAMED -cp out com.drew.gba.client.netplay.NetplayHashCheck \

@@ -1,7 +1,7 @@
 # gbacore - native GBA emulator library
 
 `libgbacore` wraps **mGBA 0.10.5** (GBA core only, built statically into the library) behind the
-C ABI in `include/gbacore.h` (contract: `../SPEC.md`, API version 2) and adds a serial-level
+C ABI in `include/gbacore.h` (contract: `../SPEC.md`, API version 3) and adds a serial-level
 **link cable** that works across processes: the host only forwards opaque byte messages.
 
 ## Build
@@ -88,7 +88,37 @@ of a state to fixed values (`ranSinceDone`, pending/settle flags, sequence numbe
 zeroes its output buffer first so states can be hashed. Version 1 libraries lack `gba_set_rtc`; the Java binding still
 loads them (no netplay).
 
-## Link cable
+## Lockstep groups (API version 3)
+
+`gba_group_create(n)`, `gba_group_add(group, core)` (player order; ROM, save, state and virtual RTC first),
+`gba_group_run_frame(group)`, `gba_group_destroy(group)`. Used by input-sync netplay; all cores live in one process.
+
+The link is mGBA's own `GBASIOLockstep` + `mLockstep`: the code behind the multiplayer windows of mGBA's Qt frontend, which
+is known to do Pokemon Gen 3 trades and battles. It was written for one thread per core. Its `mLockstep` callbacks do not
+block there either: the master posts "cycles you may run" to the followers (`addCycles`), followers stop when they have used
+them (`useCycles`), the master stops at the two sync points of a transfer until the followers signal (`wait` / `signal`).
+Here the callbacks in `gbacore.c` mirror `MultiplayerController.cpp`, and "stopped" simply means the scheduler does not step
+that core. `gba_group_run_frame` loops in fixed rounds: every awake core in index order does one `ARMRunLoop` (up to its
+next timing event); a core that finished its video frame only runs on when the master waits for it; the call returns when
+every core completed one frame. Nothing depends on time or threads, so it is deterministic and identical on every platform.
+The master may run up to ~2000 cycles (one lockstep increment) ahead of the followers.
+
+* Each core's finished frame is copied, so `gba_framebuffer` is stable.
+* Save states of grouped cores get a 128 byte trailer (`gba_state_size` includes it): node fields (`nextEvent`, `eventDiff`,
+  mode, scheduled event delta), the scheduler state (awake, posted cycles, wait mask), the lockstep phase and receive
+  buffers, plus the live SIOCNT/RCNT and SIOMLT_SEND (an mGBA state stores only the raw IO copies and omits write-only
+  registers) and the CPU `nextEvent` is recomputed on load. States with/without trailer load into grouped/ungrouped cores
+  (a trailer is applied when the last core joins; without one the link restarts idle). `test_group` proves a reload at any
+  frame continues bit-identically.
+* A member that is destroyed or reloaded dissolves the group (the others get the classic driver back, idle).
+* Limits: mGBA's lockstep gives a Normal-mode master 0xFFFFFFFF and has the followers finish a transfer early (about one
+  transfer time before the master); Multiplayer mode is complete. UART/JOY/GBA-Player are not supported.
+
+## Link cable (classic mode, network between different processes)
+
+The old driver below is only used by classic mode (players with different ROMs). It is NOT accepted by Pokemon Emerald's
+Cable Club (see CHANGELOG 0.4.2, `tests/emerald_harness.c`): the SD/SI approximations and completion at frame boundaries
+differ from real hardware timing. Classic mode has the same risk over a network.
 
 Implemented as a custom `GBASIODriver` for Normal-8, Normal-32 and Multiplayer (2-4 players),
 modelled on `src/gba/sio/lockstep.c` but with messages instead of shared memory.
@@ -151,7 +181,10 @@ configure) and feed the "all ready" bit.
   unplug of a busy child, re-plug.
 * `rtc`: virtual RTC reading, advancing with frames, kept across `gba_load_state`, time zone forced to UTC while virtual
   and restored afterwards.
-* `determinism`: two cores linked through the zero-latency fixed-order router that netplay uses, fixed inputs, virtual RTC;
+* `group`: lockstep groups (Normal 8/32, Multiplayer 2-4, the `gen3` ROM with timer-IRQ transfers and SD/SI/ID checks, pokesim,
+  mode mismatch, state reload equivalence, dissolve).
+* `emerald_harness` (not in ctest): boots two cores from a ROM and saves in `gba/test-roms/`, scripts input, writes PNG screenshots.
+* `determinism`: two cores in a lockstep group (what netplay uses), fixed inputs, virtual RTC;
   pins the CRC32 of both complete states at frames 100/1000/1500 (the same values the Java check prints on every CI platform).
 * `dylib`: `dlopen`s the real shared library, checks that only `gba_*` is visible and runs a ROM.
 * `exports`: `nm` check.

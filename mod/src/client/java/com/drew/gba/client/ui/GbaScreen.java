@@ -3,17 +3,14 @@ package com.drew.gba.client.ui;
 import com.drew.gba.client.emu.EmulatorSession;
 import com.drew.gba.client.emu.GbaNative;
 import com.mojang.blaze3d.platform.NativeImage;
-import com.mojang.blaze3d.platform.InputConstants;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.input.KeyEvent;
-import net.minecraft.client.renderer.RenderPipelines;
 import net.minecraft.client.renderer.texture.DynamicTexture;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
-import net.minecraft.sounds.SoundSource;
 
 import java.util.List;
 
@@ -27,8 +24,8 @@ public final class GbaScreen extends Screen {
 
 	private final EmulatorSession session; // null in message mode
 	private final List<String> message;
-	private static final int SW_W = 40, SW_H = 14;
-	private int swCx, swCy; // power switch centre (GUI px), set while rendering; 0 = not shown
+	private boolean builtLinked;
+	private final SessionControls controls; // buttons, power switch and volume wheels (shared with the CRT options panel)
 	private DynamicTexture texture;
 	private int lastSeq = -1;
 	private final byte[] frameCopy = new byte[W * H * 4];
@@ -40,6 +37,12 @@ public final class GbaScreen extends Screen {
 		super(Component.literal("Game Boy Advance"));
 		this.session = session;
 		this.message = List.of();
+		this.controls = new SessionControls(session, new SessionControls.Host() {
+			@Override public Screen screen() { return GbaScreen.this; }
+			@Override public void importStarting() { childOpen = true; } // the child screens return here; removed() must not suspend the game
+			@Override public void closeAfterPowerOff() { onClose(); }
+			@Override public void leave() { onClose(); }
+		});
 	}
 
 	/** Message-only mode (missing ROM, missing native library, ...). */
@@ -47,6 +50,7 @@ public final class GbaScreen extends Screen {
 		super(Component.literal("Game Boy Advance"));
 		this.session = null;
 		this.message = message;
+		this.controls = null;
 	}
 
 	@Override
@@ -62,56 +66,53 @@ public final class GbaScreen extends Screen {
 		}
 		int by = height - 24;
 		int cx = width / 2;
-		int bw = Math.min(92, (width - 20 - 4 * 4) / 5), gap = 4;
-		int x0 = cx - (5 * bw + 4 * gap) / 2;
-		addRenderableWidget(Button.builder(Component.literal("Save (F5)"), b -> session.saveStateAsync())
-			.bounds(x0, by, bw, 18).build());
-		addRenderableWidget(Button.builder(Component.literal("Load (F8)"), b -> session.loadStateAsync())
-			.bounds(x0 + (bw + gap), by, bw, 18).build());
-		addRenderableWidget(Button.builder(Component.literal("Export .sav"), b -> session.exportSaveAsync())
-			.bounds(x0 + 2 * (bw + gap), by, bw, 18).build());
-		addRenderableWidget(Button.builder(Component.literal("Import .sav"), b -> openImport())
-			.bounds(x0 + 3 * (bw + gap), by, bw, 18).build());
-		addRenderableWidget(Button.builder(Component.literal("Close (Esc)"), b -> onClose())
-			.bounds(x0 + 4 * (bw + gap), by, bw, 18).build());
-	}
-
-	/** Import flow: picker -> confirmation -> the session restarts from the imported save. The game keeps running behind. */
-	private void openImport() {
-		if (session == null || session.isFinished()) return;
-		session.releaseAll();
-		session.turbo = false;
-		childOpen = true; // the child screens return here; this screen must not suspend the game in removed()
-		ImportConfirmScreen.begin(this, session);
-	}
-
-	/** Slide the power switch: save, delete the suspend state, close. */
-	private void powerOff() {
-		if (session == null) return;
-		session.powerOff();
-		onClose();
+		builtLinked = com.drew.gba.client.ClientCable.linked();
+		int n = builtLinked ? 6 : 5; // an Unlink button joins the row while cabled
+		int bw = Math.min(92, (width - 20 - (n - 1) * 4) / n), gap = 4;
+		int x0 = cx - (n * bw + (n - 1) * gap) / 2;
+		addRenderableWidget(controls.save(x0, by, bw, 18));
+		addRenderableWidget(controls.load(x0 + (bw + gap), by, bw, 18));
+		addRenderableWidget(controls.export(x0 + 2 * (bw + gap), by, bw, 18));
+		addRenderableWidget(controls.importSav(x0 + 3 * (bw + gap), by, bw, 18));
+		if (builtLinked) addRenderableWidget(controls.unlink(x0 + 4 * (bw + gap), by, bw, 18));
+		addRenderableWidget(controls.leave("Close (Esc)", x0 + (n - 1) * (bw + gap), by, bw, 18));
 	}
 
 	/** Dev/test: centre of the power switch in GUI px (valid after the first render), or null. */
-	public int[] powerSwitchCenter() { return swCx > 0 ? new int[] {swCx, swCy} : null; }
+	public int[] powerSwitchCenter() { return controls == null ? null : controls.powerSwitchCenter(); }
 
-	private boolean overSwitch(double mx, double my) {
-		return session != null && swCx > 0 && Math.abs(mx - swCx) <= SW_W / 2.0 + 1 && Math.abs(my - swCy) <= SW_H / 2.0 + 1;
-	}
+	/** Dev/test: the volume knobs' controller, to drive hover / drag (null in message mode). */
+	public SessionControls controls() { return controls; }
 
 	@Override
 	public boolean mouseClicked(net.minecraft.client.input.MouseButtonEvent event, boolean doubleClick) {
-		if (event.button() == InputConstants.MOUSE_BUTTON_LEFT && overSwitch(event.x(), event.y())) {
-			powerOff();
-			return true;
-		}
+		if (controls != null && controls.mouseClicked(event)) return true;
 		return super.mouseClicked(event, doubleClick);
+	}
+
+	@Override
+	public boolean mouseDragged(net.minecraft.client.input.MouseButtonEvent event, double dx, double dy) {
+		if (controls != null && controls.mouseDragged(dx, dy)) return true;
+		return super.mouseDragged(event, dx, dy);
+	}
+
+	@Override
+	public boolean mouseReleased(net.minecraft.client.input.MouseButtonEvent event) {
+		if (controls != null && controls.mouseReleased()) return true;
+		return super.mouseReleased(event);
+	}
+
+	@Override
+	public boolean mouseScrolled(double x, double y, double scrollX, double scrollY) {
+		if (controls != null && controls.mouseScrolled(x, y, scrollY)) return true;
+		return super.mouseScrolled(x, y, scrollX, scrollY);
 	}
 
 	@Override
 	public boolean keyPressed(KeyEvent event) {
 		if (session == null) return super.keyPressed(event);
-		if (GbaKeys.press(session, event.key(), this::powerOff)) return true;
+		if (GbaKeys.press(session, event.key(), () -> { session.powerOff(); onClose(); })) return true;
+		if (controls.volumeKey(event.key()) || controls.unlinkKey(event)) return true;
 		return super.keyPressed(event);
 	}
 
@@ -125,7 +126,8 @@ public final class GbaScreen extends Screen {
 	@Override
 	public void tick() {
 		if (session == null) return;
-		session.setVolume(minecraft.options.getSoundSourceVolume(SoundSource.MASTER));
+		controls.tick();
+		if (com.drew.gba.client.ClientCable.linked() != builtLinked) rebuildWidgets();
 		if (!minecraft.isWindowActive() && System.getProperty("gbalink.autotest") == null) { // (dev autotest runs unfocused)
 			session.releaseAll();
 			session.turbo = false;
@@ -178,12 +180,11 @@ public final class GbaScreen extends Screen {
 		// screen well
 		g.fill(wellL, sy - wellPad, wellR, sy + dh + wellPad, 0xFF1A1830);
 		g.fill(sx - 3, sy - 3, sx + dw + 3, sy + dh + 3, 0xFF000000);
-		swCx = bodyL + 8 + 44 + 10 + SW_W / 2;
-		swCy = bodyT + 6;
-		boolean room = width / 2 - swCx - SW_W / 2 - 14 >= font.width("GAME BOY ADVANCE") / 2;
+		int swCx = bodyL + 8 + 44 + 10 + SessionControls.SW_W / 2, swCy = bodyT + 6;
+		boolean room = width / 2 - swCx - SessionControls.SW_W / 2 - 14 >= font.width("GAME BOY ADVANCE") / 2;
 		if (room) g.centeredText(font, "GAME BOY ADVANCE", width / 2, bodyT + 6, 0xFFD8CCFF);
-		else if (width / 2 - swCx < SW_W / 2 + 14) swCx = 0; // no space for the switch at all
-		if (swCx > 0) drawPowerSwitch(g, mouseX, mouseY, room);
+		if (!room && width / 2 - swCx < SessionControls.SW_W / 2 + 14) controls.hideSwitch(); // no space for the switch at all
+		else controls.drawPowerSwitch(g, font, swCx, swCy, mouseX, mouseY, room || font.width("POWER OFF (P)") / 2 < width / 2 - swCx);
 
 		// the live frame
 		if (texture != null && !session.isFinished()) {
@@ -200,7 +201,7 @@ public final class GbaScreen extends Screen {
 			g.blit(TEX, sx, sy, sx + dw, sy + dh, 0f, 1f, 0f, 1f);
 		}
 
-		drawControls(g, bodyL, bodyR, wellL, wellR, bodyT, sy, dh);
+		drawControls(g, mouseX, mouseY, bodyL, bodyR, wellL, wellR, bodyT, sy, dh);
 
 		// status line below the bezel; a toast (saved / state loaded / ...) temporarily takes its place so it
 		// can never be pushed off the top of a small window
@@ -209,6 +210,9 @@ public final class GbaScreen extends Screen {
 			g.centeredText(font, toast, width / 2, bodyB + 4, 0xFFFFFFAA);
 		} else {
 			String status = session.error() != null ? session.error() : session.linkStatus();
+			if (session.error() == null && com.drew.gba.client.ClientCable.linked() && session.linkStatus().startsWith("Link: not connected")) {
+				status = "Cable to " + com.drew.gba.client.ClientCable.partnerText() + ": " + com.drew.gba.client.ClientCable.stateLine();
+			}
 			g.centeredText(font, status, width / 2, bodyB + 4, session.error() != null ? 0xFFFF8888 : 0xFFD8CCFF);
 			String stats = session.error() != null ? "" : session.linkStatsLine();
 			if (!stats.isEmpty()) g.centeredText(font, stats, width / 2, Math.min(bodyB + 15, height - 34), 0xFF9C92C4);
@@ -221,30 +225,7 @@ public final class GbaScreen extends Screen {
 
 	private static final int LABEL = 0xFFC9BDF2;
 
-	private static Identifier gui(String name) {
-		return Identifier.fromNamespaceAndPath("gbalink", "textures/gui/" + name + ".png");
-	}
-
-	/** Blits a 4x supersampled sprite (4*gw x 4*gh texels) at gw x gh GUI px, centred on (cx, cy), alpha blended. */
-	private static void sprite(GuiGraphicsExtractor g, String name, int cx, int cy, int gw, int gh) {
-		int tw = gw * 4, th = gh * 4;
-		g.blit(RenderPipelines.GUI_TEXTURED, gui(name), cx - gw / 2, cy - gh / 2, 0f, 0f, gw, gh, tw, th, tw, th);
-	}
-
-	private void drawPowerSwitch(GuiGraphicsExtractor g, int mouseX, int mouseY, boolean roomForLabel) {
-		boolean hover = overSwitch(mouseX, mouseY);
-		sprite(g, hover ? "power_off" : "power_on", swCx, swCy, SW_W, SW_H);
-		boolean ok = session.error() == null && !session.isFinished();
-		sprite(g, ok ? "led_green" : "led_red", swCx + SW_W / 2 + 8, swCy, 8, 8);
-		if (hover) {
-			String t = "POWER OFF (P)";
-			if (roomForLabel || font.width(t) / 2 < width / 2 - swCx) {
-				g.text(font, t, swCx - font.width(t) / 2, swCy + SW_H / 2 + 3, 0xFFFFE08A, false);
-			}
-		}
-	}
-
-	private void drawControls(GuiGraphicsExtractor g, int bodyL, int bodyR, int wellL, int wellR, int bodyT, int sy, int dh) {
+	private void drawControls(GuiGraphicsExtractor g, int mouseX, int mouseY, int bodyL, int bodyR, int wellL, int wellR, int bodyT, int sy, int dh) {
 		int held = session.heldMask();
 		int midY = sy + dh / 2;
 		// D-pad: centred in the left wing (between the body edge and the screen well)
@@ -254,25 +235,30 @@ public final class GbaScreen extends Screen {
 		else if ((held & (1 << DOWN)) != 0) dir = "down";
 		if ((held & (1 << LEFT)) != 0) dir = dir.isEmpty() ? "left" : dir + "_left";
 		else if ((held & (1 << RIGHT)) != 0) dir = dir.isEmpty() ? "right" : dir + "_right";
-		sprite(g, dir.isEmpty() ? "dpad" : "dpad_" + dir, dx, midY, 40, 40);
+		GuiSprites.sprite(g, dir.isEmpty() ? "dpad" : "dpad_" + dir, dx, midY, 40, 40);
 		// A (up-right) / B (down-left): centred in the right wing, letters printed on the body below each button
 		int cx = (wellR + bodyR) / 2;
 		int ax = cx + 9, ay = midY - 10, bx = cx - 9, by = midY - 1;
 		boolean aDown = (held & (1 << A)) != 0, bDown = (held & (1 << B)) != 0;
-		sprite(g, bDown ? "button_pressed" : "button", bx, by, 26, 26);
-		sprite(g, aDown ? "button_pressed" : "button", ax, ay, 26, 26);
+		GuiSprites.sprite(g, bDown ? "button_pressed" : "button", bx, by, 26, 26);
+		GuiSprites.sprite(g, aDown ? "button_pressed" : "button", ax, ay, 26, 26);
 		g.text(font, "A", ax - font.width("A") / 2, ay + 11, LABEL, false);
 		g.text(font, "B", bx - font.width("B") / 2, by + 11, LABEL, false);
 		// Start / Select pills below the screen, each with its label under it
 		int ly = sy + dh + 14, mid = width / 2;
-		sprite(g, (held & (1 << SELECT)) != 0 ? "pill_pressed" : "pill", mid - 24, ly, 28, 12);
-		sprite(g, (held & (1 << START)) != 0 ? "pill_pressed" : "pill", mid + 24, ly, 28, 12);
+		GuiSprites.sprite(g, (held & (1 << SELECT)) != 0 ? "pill_pressed" : "pill", mid - 24, ly, 28, 12);
+		GuiSprites.sprite(g, (held & (1 << START)) != 0 ? "pill_pressed" : "pill", mid + 24, ly, 28, 12);
 		g.text(font, "SELECT", mid - 24 - font.width("SELECT") / 2, ly + 7, LABEL, false);
 		g.text(font, "START", mid + 24 - font.width("START") / 2, ly + 7, LABEL, false);
 		// shoulder buttons along the top corners of the body
 		int shY = bodyT + 6;
-		sprite(g, (held & (1 << L)) != 0 ? "shoulder_pressed" : "shoulder", bodyL + 8 + 22, shY, 44, 10);
-		sprite(g, (held & (1 << R)) != 0 ? "shoulder_pressed" : "shoulder", bodyR - 8 - 22, shY, 44, 10);
+		GuiSprites.sprite(g, (held & (1 << L)) != 0 ? "shoulder_pressed" : "shoulder", bodyL + 8 + 22, shY, 44, 10);
+		GuiSprites.sprite(g, (held & (1 << R)) != 0 ? "shoulder_pressed" : "shoulder", bodyR - 8 - 22, shY, 44, 10);
+		// volume wheels along the bottom edge, in the wing columns under the D-pad (GBA) and the A/B buttons (Minecraft)
+		int kTop = sy + dh + 7;
+		controls.gba.layout(dx, kTop);
+		controls.mc.layout(cx, kTop);
+		controls.renderKnobs(g, font, mouseX, mouseY);
 	}
 
 	@Override
@@ -285,6 +271,7 @@ public final class GbaScreen extends Screen {
 		if (childOpen) { childOpen = false; return; } // only switching to the import screens
 		if (closed) return;
 		closed = true;
+		if (controls != null) controls.flush();
 		if (session != null) {
 			session.requestStop(); // suspends in the background; the ack needs this thread, so never block on it
 			if (texture != null) {

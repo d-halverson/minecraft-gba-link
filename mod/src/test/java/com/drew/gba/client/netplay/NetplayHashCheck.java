@@ -38,7 +38,6 @@ public final class NetplayHashCheck {
 			if (!cs[i].setRtc(epoch, GbaNative.RTC_VIRTUAL)) throw new IllegalStateException("rtc");
 			if (saves != null && saves[i] != null && saves[i].length > 0) cs[i].loadSave(saves[i]);
 			if (states != null && !cs[i].loadState(states[i])) throw new IllegalStateException("state");
-			cs[i].linkConfigure(i, players);
 		}
 		return cs;
 	}
@@ -83,10 +82,10 @@ public final class NetplayHashCheck {
 		Path gameDir = Path.of(a[0]);
 		GbaNative n = GbaNative.get(gameDir);
 		if (n == null) throw new IllegalStateException("native library not loaded: " + GbaNative.loadError());
-		if (!n.supportsNetplay()) throw new IllegalStateException("native library without the virtual RTC");
+		if (!n.supportsNetplay()) throw new IllegalStateException("native library without lockstep groups (API 3)");
 		Path rom = Path.of(a[1]);
 		StringBuilder sb = new StringBuilder();
-		sb.append("native api ").append(n.supportsNetplay() ? "2" : "1").append('\n');
+		sb.append("native api ").append(n.supportsNetplay() ? "3" : "1").append('\n');
 		sb.append(run(n, rom, 2));
 		sb.append(run(n, rom, 3));
 		if (a.length > 2) Files.writeString(Path.of(a[2]), sb.toString());

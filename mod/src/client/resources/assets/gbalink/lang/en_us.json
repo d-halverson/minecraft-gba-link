@@ -1,4 +1,5 @@
 {
   "key.gbalink.burn": "Burn game onto Blank Game Pak",
+  "key.gbalink.unlink": "Unlink from the link cable",
   "key.category.gbalink.main": "GBA Link"
 }

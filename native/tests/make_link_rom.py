@@ -18,6 +18,8 @@ ROM variants (file name -> behaviour):
   multi       Multiplayer mode, IRQ driven; whoever is player 0 (SIOCNT bit 2 clear) starts
               every transfer from the SIO interrupt handler.
   n32_master_irq  like n32_master but completion handled by the SIO IRQ
+  gen3        Gen 3 style multiplayer (see gen3_rom): transfers started from a Timer 3 IRQ only when SIOCNT shows
+              SD=1 (everybody ready) and SI=0 (master); SIOCNT SD/SI/ID/error bits logged, same ROM for every role.
   pokesim     "Pokemon-like" Multiplayer traffic (see pokesim_rom): one exchange per vblank, sequence + checksum
               validation, good/bad/missed counters in EWRAM and on screen. Same ROM for every role.
 """
@@ -305,6 +307,118 @@ def n32_master_irq_rom():
     return a
 
 
+def gen3_rom():
+    """Gen 3 (Pokemon FRLG/Emerald) style multiplayer: the role comes from the SIOCNT terminals (SD bit 3, SI bit 2),
+    the master starts a transfer from a Timer 3 interrupt only when SD = 1 ("all GBAs ready") and the port is idle, the
+    SIO interrupt reads SIOMULTI0-3 and checks the ID / error bits and loads the next word to send.
+    EWRAM: 00 completed transfers, 08 timer IRQs, 0C master wanted to start but SD was 0, 10 transfers started,
+    14 SIOCNT error bit (6) seen in the SIO IRQ, 18 SIOCNT busy bit seen set in the SIO IRQ (must stay 0),
+    E0 last SIOCNT seen by the timer, E4 SIOCNT seen by the timer right before the last start,
+    F0 base value, F4 gate (master waits until the test sets it). Log entry k (16 bytes at 100 + 16k):
+    SIOMULTI0-3, SIOCNT in the IRQ (+8), SIOMLT_SEND of this transfer (+10), SIOCNT the timer saw before it (+12)."""
+    a = Asm()
+    E = lambda w: a.emit(w)
+
+    def inc(off, tmp="r8"):
+        a.ldr(tmp, "r5", off); a.add(tmp, tmp, 1); a.str(tmp, "r5", off)
+
+    a.label("main")
+    a.ldr_const("r4", IO)
+    a.ldr_const("r5", EWRAM)
+    a.ldr_const("r1", 0x03007FFC)
+    a.ldr_const("r2", ('label', "handler"))
+    a.str("r2", "r1", 0)                      # IRQ vector
+    a.mov("r1", 0)
+    a.strh("r1", "r4", 0x34)                  # RCNT = 0
+    a.ldr_const("r1", 0x6003)                 # multiplayer, IRQ enable, 115200 baud
+    a.strh("r1", "r4", 0x28)
+    a.ldr("r7", "r5", 0xF0)
+    a.strh("r7", "r4", 0x2A)                  # SIOMLT_SEND = base + 0
+    a.ldr_const("r1", 0xF000)                 # Timer 3 reload: overflows every 4096 cycles
+    a.strh("r1", "r4", 0x0C)
+    a.ldr_const("r1", 0x00C0)                 # enable + IRQ, prescaler 1
+    a.strh("r1", "r4", 0x0E)
+    a.ldr_const("r8", IOINT)
+    a.mov("r1", 0xC0)
+    a.strh("r1", "r8", 0)                     # IE = SIO | timer 3
+    a.mov("r1", 1)
+    a.strh("r1", "r8", 8)                     # IME
+    a.label("idle")
+    a.b("idle")
+
+    a.label("handler")
+    E(0xE92D43F0)                             # stmfd sp!,{r4-r9,lr}
+    a.ldr_const("r0", IOINT)
+    a.ldr_const("r4", IO)
+    a.ldr_const("r5", EWRAM)
+    a.ldrh("r1", "r0", 2)
+    a.and_("r2", "r1", 0xC0)
+    a.strh("r2", "r0", 2)                     # acknowledge what we saw
+    a.tst("r1", 0x80)
+    a.beq("no_sio")
+    a.ldr("r3", "r5", 0)
+    a.lsl("r2", "r3", 4)
+    a.add_reg("r2", "r2", "r5")
+    a.add("r2", "r2", 0x100)
+    for i in range(4):
+        a.ldrh("r12", "r4", 0x20 + 2 * i)
+        a.strh("r12", "r2", 2 * i)
+    a.ldrh("r12", "r4", 0x28)
+    a.strh("r12", "r2", 8)
+    a.tst("r12", 0x40)
+    a.beq("noerr")
+    inc(0x14)
+    a.label("noerr")
+    a.ldrh("r12", "r4", 0x28)
+    a.tst("r12", 0x80)
+    a.beq("nobusy")
+    inc(0x18)
+    a.label("nobusy")
+    a.ldrh("r12", "r4", 0x2A)
+    a.strh("r12", "r2", 10)
+    a.ldr("r12", "r5", 0xE4)
+    a.strh("r12", "r2", 12)
+    a.add("r3", "r3", 1)
+    a.str("r3", "r5", 0)
+    a.ldr("r12", "r5", 0xF0)
+    a.add_reg("r12", "r12", "r3")
+    a.strh("r12", "r4", 0x2A)                 # next word to send
+    a.label("no_sio")
+    a.tst("r1", 0x40)
+    a.beq("out")
+    inc(0x08)
+    a.ldrh("r6", "r4", 0x28)
+    a.str("r6", "r5", 0xE0)
+    a.and_("r7", "r6", 0xC)
+    a.cmp("r7", 0x8)                          # terminals: SD set, SI clear = master with everybody ready
+    a.bne("not_ready")
+    a.ldr("r8", "r5", 0xF4)
+    a.cmp("r8", 0)
+    a.beq("out")
+    a.tst("r6", 0x80)
+    a.bne("out")
+    a.ldr("r8", "r5", 0x10)                   # only after the SIO IRQ of the previous transfer has been handled
+    a.ldr("r9", "r5", 0)
+    E(0xE1580009)                             # cmp r8,r9
+    a.bne("out")
+    a.str("r6", "r5", 0xE4)
+    a.orr("r6", "r6", 0x80)
+    a.strh("r6", "r4", 0x28)
+    inc(0x10)
+    a.b("out")
+    a.label("not_ready")
+    a.tst("r6", 4)
+    a.bne("out")                              # a child never starts
+    a.ldr("r8", "r5", 0xF4)
+    a.cmp("r8", 0)
+    a.beq("out")
+    inc(0x0C)
+    a.label("out")
+    E(0xE8BD43F0)
+    a.bx_lr()
+    return a
+
+
 # ---------------------------------------------------------------------------------------------------------
 # pokesim: mimics Gen 3 link behaviour (one multi-play exchange per frame, driven from the vblank handler)
 #
@@ -555,6 +669,7 @@ VARIANTS = {
     "n8_slave": lambda: normal_rom(8, False),
     "multi": multi_rom,
     "n32_master_irq": n32_master_irq_rom,
+    "gen3": gen3_rom,
     "pokesim": pokesim_rom,
 }
 

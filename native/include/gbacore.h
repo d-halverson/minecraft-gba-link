@@ -1,5 +1,5 @@
 /* gbacore.h - C ABI of the GBA emulator shim (mGBA 0.10.5 + serial-level link cable).
- * Contract: gba/SPEC.md. API version 2. */
+ * Contract: gba/SPEC.md. API version 3. */
 #ifndef GBACORE_H
 #define GBACORE_H
 
@@ -38,7 +38,7 @@ typedef struct gba_core gba_core;
                                   to continue the SAME frame */
 #define GBA_RUN_ERROR     -1
 
-GBA_API uint32_t    gba_api_version(void);              /* returns 2 for this spec (1 = no gba_set_rtc) */
+GBA_API uint32_t    gba_api_version(void);              /* returns 3 for this spec (2 = no groups, 1 = no gba_set_rtc) */
 GBA_API gba_core*   gba_create(void);
 GBA_API void        gba_destroy(gba_core*);
 
@@ -93,6 +93,26 @@ GBA_API void        gba_link_deliver(gba_core*, int from_player_index, const uin
 #define GBA_RTC_WALL    0
 #define GBA_RTC_VIRTUAL 1
 GBA_API int         gba_set_rtc(gba_core*, int64_t epoch_seconds, int mode);
+
+/* ---- Lockstep groups (API version 3) ----
+   Several cores of ONE process linked with mGBA's own GBASIOLockstep (the code behind mGBA's multiplayer windows) and
+   stepped by this library in a fixed order on the calling thread: deterministic, no link messages, no LINK_WAIT.
+   Used by input-sync netplay. A core in a group has its classic cable unplugged and cannot be run with gba_run_frame.
+   Create the group for n cores (1..4), then gba_group_add the cores in player order (index 0 = master); load the ROM
+   (and save / state / virtual RTC) BEFORE adding. gba_group_run_frame advances every core by one video frame (each
+   core's framebuffer shows its completed frame; audio is queued per core).
+   Save states of grouped cores carry the lockstep state in a trailer (gba_state_size grows by 128 bytes); states with
+   or without the trailer can be loaded into grouped or ungrouped cores (a trailer is kept and applied when the last
+   core joins; without one the link restarts idle).
+   Destroying a member core, loading a ROM into it, or gba_group_destroy dissolves the group: the remaining cores get
+   their classic link driver back (idle). */
+typedef struct gba_group gba_group;
+GBA_API gba_group*  gba_group_create(int players);
+GBA_API int         gba_group_add(gba_group*, gba_core*);          /* 0 ok */
+GBA_API int         gba_group_run_frame(gba_group*);                /* GBA_RUN_FRAME_DONE or GBA_RUN_ERROR */
+GBA_API void        gba_group_destroy(gba_group*);
+/* Diagnostics: how often the scheduler found every core asleep and had to wake them (expected 0). */
+GBA_API long        gba_group_stalls(gba_group*);
 
 #ifdef __cplusplus
 }

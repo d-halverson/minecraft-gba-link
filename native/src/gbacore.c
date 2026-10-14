@@ -17,6 +17,7 @@
 #include <mgba/internal/gba/io.h>
 #include <mgba/internal/gba/savedata.h>
 #include <mgba/internal/gba/sio.h>
+#include <mgba/internal/gba/sio/lockstep.h>
 #include <mgba/internal/gba/video.h>
 #include <mgba-util/vfs.h>
 
@@ -26,7 +27,7 @@
 #include <string.h>
 #include <time.h>
 
-#define GBA_API_VERSION 2u
+#define GBA_API_VERSION 3u
 
 /* ------------------------------------------------------------------------------------ */
 /* link layer                                                                           */
@@ -112,6 +113,11 @@ struct gba_core {
 	size_t ringHead, ringCount;
 	bool rtcVirtual;        /* virtual RTC active (holds one reference on the process-wide UTC time zone) */
 	struct gba_link link;
+	/* API 3: member of a lockstep group (mGBA GBASIOLockstep) */
+	struct gba_group* group;
+	int gidx;
+	color_t* shown;          /* last completed frame (group members) */
+	uint8_t* stash;          /* lockstep trailer of a loaded state, applied when the core joins a group */
 };
 
 /* ---- helpers ---- */
@@ -702,6 +708,14 @@ static void nullLog(struct mLogger* l, int category, enum mLogLevel level, const
 }
 static struct mLogger g_nullLogger = { nullLog, NULL };
 
+/* group support (defined below) */
+#define GRP_TRAILER 128
+static bool grpTrailerValid(const uint8_t* t);
+static void grpSaveTrailer(gba_core* c, uint8_t* out);
+static void grpBeforeLoad(gba_core* c);
+static void grpAfterLoad(gba_core* c, const uint8_t* trailer);
+static void grpDetach(gba_core* c);
+
 GBA_API uint32_t gba_api_version(void) { return GBA_API_VERSION; }
 
 GBA_API gba_core* gba_create(void) {
@@ -739,6 +753,9 @@ GBA_API void gba_destroy(gba_core* c) {
 	if (!c) {
 		return;
 	}
+	if (c->group) {
+		grpDetach(c);
+	}
 	c->link.dead = true;
 	if (c->rtcVirtual) {
 		c->rtcVirtual = false;
@@ -747,6 +764,8 @@ GBA_API void gba_destroy(gba_core* c) {
 	mCoreConfigDeinit(&c->core->config);
 	c->core->deinit(c->core); /* unloads ROM, closes the save VFile and frees the core */
 	free(c->video);
+	free(c->shown);
+	free(c->stash);
 	free(c->ring);
 	free(c);
 }
@@ -877,6 +896,9 @@ GBA_API int gba_run_frame(gba_core* c) {
 	if (!c || !c->romLoaded) {
 		return GBA_RUN_ERROR;
 	}
+	if (c->group) {
+		return GBA_RUN_ERROR; /* grouped cores run through gba_group_run_frame */
+	}
 	struct gba_link* L = &c->link;
 	if (L->mstate == M_WAIT) {
 		return GBA_RUN_LINK_WAIT;
@@ -914,7 +936,7 @@ GBA_API int gba_run_frame(gba_core* c) {
 }
 
 GBA_API const uint8_t* gba_framebuffer(gba_core* c) {
-	return c ? (const uint8_t*) c->video : NULL;
+	return c ? (const uint8_t*) (c->group ? c->shown : c->video) : NULL;
 }
 
 GBA_API size_t gba_read_audio(gba_core* c, int16_t* out, size_t max_frames) {
@@ -1036,15 +1058,17 @@ GBA_API int gba_save_dirty(gba_core* c) {
 
 /* ---- save states ---- */
 
+static size_t grpTrailer(gba_core* c);
 GBA_API size_t gba_state_size(gba_core* c) {
-	return c ? c->core->stateSize(c->core) : 0;
+	return c ? c->core->stateSize(c->core) + grpTrailer(c) : 0;
 }
 
 GBA_API size_t gba_save_state(gba_core* c, uint8_t* out, size_t cap) {
 	if (!c || !c->romLoaded || !out) {
 		return 0;
 	}
-	size_t n = c->core->stateSize(c->core);
+	size_t base = c->core->stateSize(c->core);
+	size_t n = base + grpTrailer(c);
 	if (cap < n) {
 		return 0;
 	}
@@ -1052,16 +1076,34 @@ GBA_API size_t gba_save_state(gba_core* c, uint8_t* out, size_t cap) {
 	if (!c->core->saveState(c->core, out)) {
 		return 0;
 	}
+	if (c->group) {
+		grpSaveTrailer(c, out + base);
+	}
 	return n;
 }
 
 GBA_API int gba_load_state(gba_core* c, const uint8_t* data, size_t len) {
-	if (!c || !c->romLoaded || !data || len != c->core->stateSize(c->core)) {
+	size_t base = c ? c->core->stateSize(c->core) : 0;
+	if (!c || !c->romLoaded || !data || (len != base && len != base + GRP_TRAILER)) {
 		return -1;
 	}
+	bool trailer = len == base + GRP_TRAILER && grpTrailerValid(data + base);
 	int64_t clockMs = c->rtcVirtual ? rtcFakeMs(c->core) : 0;
+	if (c->group) {
+		grpBeforeLoad(c);
+	}
 	if (!c->core->loadState(c->core, data)) {
 		return -2;
+	}
+	free(c->stash);
+	c->stash = NULL;
+	if (c->group) {
+		grpAfterLoad(c, trailer ? data + base : NULL);
+	} else if (trailer) {
+		c->stash = malloc(GRP_TRAILER);
+		if (c->stash) {
+			memcpy(c->stash, data + base, GRP_TRAILER);
+		}
 	}
 	/* in-flight link transfers are not part of a state: drop them */
 	c->frameActive = false;
@@ -1076,7 +1118,7 @@ GBA_API int gba_load_state(gba_core* c, const uint8_t* data, size_t len) {
 /* ---- link API ---- */
 
 GBA_API void gba_link_configure(gba_core* c, int player_index, int player_count) {
-	if (!c) {
+	if (!c || c->group) {
 		return;
 	}
 	struct gba_link* L = &c->link;
@@ -1164,6 +1206,477 @@ GBA_API void gba_link_deliver(gba_core* c, int from, const uint8_t* d, size_t le
 	default:
 		break;
 	}
+}
+
+
+/* ------------------------------------------------------------------------------------ */
+/* lockstep groups (API 3): mGBA's own GBASIOLockstep driving several cores in one thread */
+/* ------------------------------------------------------------------------------------ */
+
+/* mGBA's lockstep is written for one thread per core. Its mLockstep callbacks (wait / signal / addCycles / useCycles ...)
+ * do not block in mGBA's own Qt frontend either: they only post "cycles you may run" to the followers and ask a core's
+ * thread to stop or continue. Here a core "sleeps" simply by not being stepped. A fixed round-robin (index order, one
+ * ARMRunLoop = up to one timing event per core per round) replaces the OS scheduler, so the result is deterministic.
+ * The callbacks mirror src/platform/qt/MultiplayerController.cpp. */
+
+struct gba_group {
+	struct GBASIOLockstep ls;
+	struct GBASIOLockstepNode nodes[MAX_GBAS];
+	struct gba_core* cores[MAX_GBAS];
+	struct {
+		int awake;
+		int32_t posted;
+		unsigned waitMask;
+	} p[MAX_GBAS];
+	int expected, added;
+	bool dissolved;
+	long stalls;
+};
+
+static struct gba_group* grpOf(struct mLockstep* l) { return l->context; }
+
+static bool cbSignal(struct mLockstep* l, unsigned mask) {
+	struct gba_group* g = grpOf(l);
+	bool woke = false;
+	g->p[0].waitMask &= ~mask;
+	if (!g->p[0].waitMask && g->p[0].awake < 1) {
+		g->p[0].awake = 1;
+		woke = true;
+	}
+	return woke;
+}
+
+static bool cbWait(struct mLockstep* l, unsigned mask) {
+	struct gba_group* g = grpOf(l);
+	bool slept = false;
+	g->p[0].waitMask |= mask;
+	if (g->p[0].awake > 0) {
+		g->p[0].awake = 0;
+		slept = true;
+	}
+	return slept;
+}
+
+static void cbAddCycles(struct mLockstep* l, int id, int32_t cycles) {
+	struct gba_group* g = grpOf(l);
+	if (cycles < 0) {
+		abort();
+	}
+	if (id == 0) {
+		int i;
+		for (i = 1; i < g->added; ++i) {
+			if (!g->cores[i] || (int) g->cores[i]->gba->sio.mode > (int) SIO_MULTI) {
+				continue;
+			}
+			g->p[i].posted += cycles;
+			if (g->p[i].awake < 1) {
+				g->nodes[i].nextEvent += g->p[i].posted;
+			}
+			g->p[i].awake = 1;
+		}
+	} else {
+		g->p[id].posted += cycles;
+	}
+}
+
+static int32_t cbUseCycles(struct mLockstep* l, int id, int32_t cycles) {
+	struct gba_group* g = grpOf(l);
+	g->p[id].posted -= cycles;
+	if (g->p[id].posted <= 0) {
+		g->p[id].awake = 0;
+	}
+	return g->p[id].posted;
+}
+
+static int32_t cbUnusedCycles(struct mLockstep* l, int id) {
+	return grpOf(l)->p[id].posted;
+}
+
+static void cbUnload(struct mLockstep* l, int id) {
+	struct gba_group* g = grpOf(l);
+	if (id) {
+		g->p[id].posted = 0;
+		g->p[0].waitMask &= ~(1u << id);
+		if (!g->p[0].waitMask && g->p[0].awake < 1) {
+			g->p[0].awake = 1;
+		}
+	} else {
+		int i;
+		for (i = 1; i < g->added; ++i) {
+			g->p[i].posted += g->nodes[0].eventDiff;
+			if (g->p[i].awake < 1) {
+				g->nodes[i].nextEvent += g->p[i].posted;
+				g->p[i].awake = 1;
+			}
+		}
+	}
+}
+
+static bool grpLinkMode(int mode) {
+	return mode == SIO_NORMAL_8 || mode == SIO_NORMAL_32 || mode == SIO_MULTI;
+}
+
+/* attachedMulti / attachedNormal are just the number of nodes in those modes */
+static void grpRecount(struct gba_group* g) {
+	int i, m = 0, n = 0;
+	for (i = 0; i < g->added; ++i) {
+		int mode = (int) g->nodes[i].mode;
+		if (mode == SIO_MULTI) {
+			++m;
+		} else if (mode == SIO_NORMAL_8 || mode == SIO_NORMAL_32) {
+			++n;
+		}
+	}
+	g->ls.attachedMulti = m;
+	g->ls.attachedNormal = n;
+}
+
+GBA_API gba_group* gba_group_create(int players) {
+	if (players < 1 || players > MAX_GBAS) {
+		return NULL;
+	}
+	struct gba_group* g = calloc(1, sizeof(*g));
+	if (!g) {
+		return NULL;
+	}
+	mLockstepInit(&g->ls.d);
+	GBASIOLockstepInit(&g->ls);
+	g->ls.d.context = g;
+	g->ls.d.signal = cbSignal;
+	g->ls.d.wait = cbWait;
+	g->ls.d.addCycles = cbAddCycles;
+	g->ls.d.useCycles = cbUseCycles;
+	g->ls.d.unusedCycles = cbUnusedCycles;
+	g->ls.d.unload = cbUnload;
+	g->expected = players;
+	int i;
+	for (i = 0; i < MAX_GBAS; ++i) {
+		g->p[i].awake = 1;
+	}
+	return g;
+}
+
+/* ---- trailer: the lockstep state of one member, appended to its save state ---- */
+
+#define TR_MAGIC 0x314B4C47u /* "GLK1" */
+
+static bool grpTrailerValid(const uint8_t* t) {
+	return get32(t) == TR_MAGIC;
+}
+
+static size_t grpTrailer(gba_core* c) {
+	return c->group ? GRP_TRAILER : 0;
+}
+
+static void grpSaveTrailer(gba_core* c, uint8_t* out) {
+	struct gba_group* g = c->group;
+	int i = c->gidx;
+	struct GBASIOLockstepNode* node = &g->nodes[i];
+	uint32_t w[28];
+	int k = 0, j;
+	memset(w, 0, sizeof(w));
+	w[k++] = TR_MAGIC;
+	w[k++] = (uint32_t) i;
+	w[k++] = (uint32_t) g->ls.d.transferActive;
+	w[k++] = (uint32_t) g->ls.d.transferCycles;
+	for (j = 0; j < 4; ++j) {
+		w[k++] = g->ls.multiRecv[j];
+	}
+	for (j = 0; j < 4; ++j) {
+		w[k++] = g->ls.normalRecv[j];
+	}
+	w[k++] = (uint32_t) node->nextEvent;
+	w[k++] = (uint32_t) node->eventDiff;
+	w[k++] = node->normalSO ? 1 : 0;
+	w[k++] = (uint32_t) (int32_t) node->mode;
+	w[k++] = node->transferFinished ? 1 : 0;
+	bool sched = mTimingIsScheduled(&c->gba->timing, &node->event);
+	w[k++] = sched ? 1 : 0;
+	w[k++] = sched ? (uint32_t) mTimingUntil(&c->gba->timing, &node->event) : 0;
+	w[k++] = (uint32_t) g->p[i].awake;
+	w[k++] = (uint32_t) g->p[i].posted;
+	w[k++] = g->p[i].waitMask;
+	w[k++] = c->gba->sio.siocnt; /* live SIOCNT / RCNT (the lockstep edits them; a state only holds the raw IO copies) */
+	w[k++] = c->gba->sio.rcnt;
+	w[k++] = c->gba->memory.io[REG_SIOMLT_SEND >> 1]; /* write-only registers are not part of an mGBA state */
+	for (j = 0; j < k; ++j) {
+		put32(out + 4 * j, w[j]);
+	}
+}
+
+static void grpApplyTrailer(gba_core* c, const uint8_t* t, bool withGroupFields) {
+	struct gba_group* g = c->group;
+	int i = c->gidx;
+	struct GBASIOLockstepNode* node = &g->nodes[i];
+	int k = 2, j;
+	uint32_t ta = get32(t + 4 * k++);
+	uint32_t tc = get32(t + 4 * k++);
+	uint32_t mr[4], nr[4];
+	for (j = 0; j < 4; ++j) {
+		mr[j] = get32(t + 4 * k++);
+	}
+	for (j = 0; j < 4; ++j) {
+		nr[j] = get32(t + 4 * k++);
+	}
+	if (withGroupFields) {
+		g->ls.d.transferActive = (enum mLockstepPhase) ta;
+		g->ls.d.transferCycles = (int32_t) tc;
+		for (j = 0; j < 4; ++j) {
+			g->ls.multiRecv[j] = (uint16_t) mr[j];
+			g->ls.normalRecv[j] = nr[j];
+		}
+	}
+	node->nextEvent = (int32_t) get32(t + 4 * k++);
+	node->eventDiff = (int32_t) get32(t + 4 * k++);
+	node->normalSO = get32(t + 4 * k++) != 0;
+	node->mode = (enum GBASIOMode) (int32_t) get32(t + 4 * k++);
+	node->transferFinished = get32(t + 4 * k++) != 0;
+	bool sched = get32(t + 4 * k++) != 0;
+	int32_t delta = (int32_t) get32(t + 4 * k++);
+	mTimingDeschedule(&c->gba->timing, &node->event);
+	if (sched) {
+		mTimingSchedule(&c->gba->timing, &node->event, delta < 0 ? 0 : delta);
+	}
+	g->p[i].awake = (int) get32(t + 4 * k++);
+	g->p[i].posted = (int32_t) get32(t + 4 * k++);
+	g->p[i].waitMask = get32(t + 4 * k++);
+	c->gba->sio.siocnt = (uint16_t) get32(t + 4 * k++);
+	c->gba->sio.rcnt = (uint16_t) get32(t + 4 * k++);
+	c->gba->memory.io[REG_SIOMLT_SEND >> 1] = (uint16_t) get32(t + 4 * k++);
+	grpRecount(g);
+}
+
+/* A core without usable lockstep state (fresh join, reset, state without a trailer): idle node in the core's current mode. */
+static void grpFreshNode(gba_core* c) {
+	struct gba_group* g = c->group;
+	int i = c->gidx;
+	struct GBASIOLockstepNode* node = &g->nodes[i];
+	mTimingDeschedule(&c->gba->timing, &node->event);
+	node->nextEvent = 0;
+	node->eventDiff = 0;
+	node->normalSO = true;
+	node->transferFinished = true;
+	node->mode = c->gba->sio.mode;
+	if (grpLinkMode((int) node->mode)) {
+		mTimingSchedule(&c->gba->timing, &node->event, 0);
+	}
+	g->p[i].awake = 1;
+	g->p[i].posted = 0;
+	g->p[i].waitMask = 0;
+	if (i == 0) {
+		g->ls.d.transferActive = TRANSFER_IDLE;
+	}
+	grpRecount(g);
+}
+
+/* mGBA's state load leaves cpu->nextEvent at the value stored in the state, which for a live core is "distance to the next
+ * timing event" but is not recomputed on load; make it exact so a reloaded core is bit-identical to the one it was saved from. */
+static void grpFixNextEvent(gba_core* c) {
+	struct mTiming* t = &c->gba->timing;
+	if (t->reroot) {
+		t->root = t->reroot;
+		t->reroot = NULL;
+	}
+	if (t->root) {
+		((struct ARMCore*) c->core->cpu)->nextEvent = mTimingNextEvent(t) + *t->relativeCycles;
+	}
+}
+
+static void grpBeforeLoad(gba_core* c) {
+	struct GBASIOLockstepNode* node = &c->group->nodes[c->gidx];
+	node->transferFinished = true; /* a mode switch during the load must not flush the old transfer into the new state */
+	mTimingDeschedule(&c->gba->timing, &node->event);
+}
+
+static void grpAfterLoad(gba_core* c, const uint8_t* trailer) {
+	if (trailer) {
+		grpApplyTrailer(c, trailer, c->gidx == 0);
+	} else {
+		grpFreshNode(c);
+	}
+	grpFixNextEvent(c);
+}
+
+/* ---- joining / leaving ---- */
+
+GBA_API int gba_group_add(gba_group* g, gba_core* c) {
+	if (!g || !c || !c->romLoaded || c->group || g->dissolved || g->added >= g->expected) {
+		return -1;
+	}
+	gba_link_configure(c, 0, 1); /* the classic cable is off while the core is in a group */
+	int i = g->added;
+	struct GBASIOLockstepNode* node = &g->nodes[i];
+	memset(node, 0, sizeof(*node));
+	node->mode = SIO_GPIO;
+	GBASIOLockstepNodeCreate(node);
+	if (!GBASIOLockstepAttachNode(&g->ls, node)) {
+		return -2;
+	}
+	g->cores[i] = c;
+	g->added = i + 1;
+	c->group = g;
+	c->gidx = i;
+	if (!c->shown) {
+		c->shown = calloc((size_t) GBA_WIDTH * GBA_HEIGHT, sizeof(color_t));
+	}
+	if (c->shown) {
+		memcpy(c->shown, c->video, (size_t) GBA_WIDTH * GBA_HEIGHT * sizeof(color_t));
+	}
+	struct GBASIO* sio = &c->gba->sio;
+	GBASIOSetDriver(sio, &node->d, SIO_MULTI);
+	GBASIOSetDriver(sio, &node->d, SIO_NORMAL_32);
+	if (g->added == g->expected) {
+		/* everybody is in: restore the lockstep state carried by the states they were loaded from, if all have it */
+		bool all = true;
+		for (i = 0; i < g->added; ++i) {
+			all = all && g->cores[i]->stash;
+		}
+		if (all) {
+			for (i = 0; i < g->added; ++i) {
+				grpApplyTrailer(g->cores[i], g->cores[i]->stash, i == 0);
+			}
+		}
+		for (i = 0; i < g->added; ++i) {
+			free(g->cores[i]->stash);
+			g->cores[i]->stash = NULL;
+		}
+		grpRecount(g);
+		for (i = 0; i < g->added; ++i) {
+			grpFixNextEvent(g->cores[i]);
+		}
+	}
+	return 0;
+}
+
+static void grpRelease(struct gba_group* g, int i) {
+	gba_core* c = g->cores[i];
+	if (!c) {
+		return;
+	}
+	struct GBASIOLockstepNode* node = &g->nodes[i];
+	struct GBASIO* s = &c->gba->sio;
+	struct gba_link* L = &c->link;
+	mTimingDeschedule(&c->gba->timing, &node->event);
+	s->drivers.multiplayer = &L->dMulti.d;
+	s->drivers.normal = &L->dNormal.d;
+	if (s->activeDriver == &node->d) {
+		int mode = (int) s->mode;
+		s->activeDriver = mode == SIO_MULTI ? &L->dMulti.d : (mode == SIO_NORMAL_8 || mode == SIO_NORMAL_32) ? &L->dNormal.d : NULL;
+		if (s->activeDriver) {
+			s->activeDriver->p = s;
+		}
+	}
+	c->group = NULL;
+	g->cores[i] = NULL;
+	free(c->shown);
+	c->shown = NULL;
+	linkReset(L); /* clears a busy bit left behind and refreshes the cable bits for the classic driver */
+}
+
+static void grpDissolve(struct gba_group* g) {
+	int i;
+	for (i = 0; i < g->added; ++i) {
+		grpRelease(g, i);
+	}
+	g->dissolved = true;
+}
+
+/* a member is destroyed or reloaded: the whole group falls apart (see gbacore.h) */
+static void grpDetach(gba_core* c) {
+	grpDissolve(c->group);
+}
+
+GBA_API void gba_group_destroy(gba_group* g) {
+	if (!g) {
+		return;
+	}
+	grpDissolve(g);
+	free(g);
+}
+
+/* ---- running ---- */
+
+GBA_API int gba_group_run_frame(gba_group* g) {
+	if (!g || g->dissolved || g->added < 1) {
+		return GBA_RUN_ERROR;
+	}
+	int n = g->added, i;
+	uint32_t start[MAX_GBAS];
+	bool done[MAX_GBAS];
+	for (i = 0; i < n; ++i) {
+		if (!g->cores[i] || !g->cores[i]->romLoaded) {
+			return GBA_RUN_ERROR;
+		}
+		start[i] = g->cores[i]->gba->video.frameCounter;
+		done[i] = false;
+	}
+	long rounds = 0, idle = 0;
+	for (;;) {
+		bool all = true;
+		for (i = 0; i < n; ++i) {
+			all = all && done[i];
+		}
+		if (all) {
+			break;
+		}
+		if (++rounds > 4000000) {
+			return GBA_RUN_ERROR;
+		}
+		bool stepped = false;
+		for (i = 0; i < n; ++i) {
+			if (g->p[i].awake < 1) {
+				continue;
+			}
+			if (done[i] && i != 0 && !(g->p[0].awake < 1 && (g->p[0].waitMask & (1u << i)))) {
+				continue; /* finished its frame: only runs on when the master waits for it */
+			}
+			gba_core* c = g->cores[i];
+			ARMRunLoop(c->core->cpu);
+			stepped = true;
+			if (!done[i] && c->gba->video.frameCounter != start[i]) {
+				done[i] = true;
+				finishFrame(c);
+				memcpy(c->shown, c->video, (size_t) GBA_WIDTH * GBA_HEIGHT * sizeof(color_t));
+			}
+		}
+		if (!stepped) {
+			/* nobody can run (should not happen): wake everybody so the frame still completes */
+			++g->stalls;
+			if (++idle > 16) {
+				return GBA_RUN_ERROR;
+			}
+			for (i = 0; i < n; ++i) {
+				g->p[i].awake = 1;
+				g->p[i].waitMask = 0;
+				if (g->p[i].posted <= 0) {
+					g->p[i].posted = 2000;
+				}
+			}
+		} else {
+			idle = 0;
+		}
+	}
+	for (i = 0; i < n; ++i) {
+		drainAudio(g->cores[i]);
+	}
+	return GBA_RUN_FRAME_DONE;
+}
+
+/* test hook: one scheduler round without frame bookkeeping; returns the bitmask of cores that were stepped */
+int gba_priv_group_round(gba_group* g) {
+	int i, m = 0;
+	for (i = 0; i < g->added; ++i) {
+		if (g->p[i].awake < 1) {
+			continue;
+		}
+		ARMRunLoop(g->cores[i]->core->cpu);
+		m |= 1 << i;
+	}
+	return m;
+}
+
+GBA_API long gba_group_stalls(gba_group* g) {
+	return g ? g->stalls : 0;
 }
 
 /* ---- virtual RTC ---- */

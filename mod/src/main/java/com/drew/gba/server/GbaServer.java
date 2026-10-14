@@ -87,6 +87,7 @@ public final class GbaServer {
 			if (ServerPlayNetworking.canSend(ctx.player(), Payloads.Welcome.TYPE)) {
 				ServerPlayNetworking.send(ctx.player(), new Payloads.Welcome(Payloads.PROTOCOL));
 			}
+			with(ctx.server(), s -> s.onClientReady(ctx.player()));
 			if (p.protocol() != Payloads.PROTOCOL) {
 				LOG.info("{} has GBA Link protocol {} (server: {})", ctx.player().getName().getString(), p.protocol(), Payloads.PROTOCOL);
 			}
@@ -100,6 +101,12 @@ public final class GbaServer {
 		ServerPlayNetworking.registerGlobalReceiver(Payloads.NetplayHashC2S.TYPE, (p, ctx) -> fastNetplayHash(ctx.player().connection, p));
 		ServerPlayNetworking.registerGlobalReceiver(Payloads.NetplaySnapshotC2S.TYPE, (p, ctx) -> with(ctx.server(), s -> s.onNetplaySnapshot(ctx.player(), p)));
 		ServerPlayNetworking.registerGlobalReceiver(Payloads.NetplayRestartC2S.TYPE, (p, ctx) -> with(ctx.server(), s -> s.onNetplayRestart(ctx.player(), p)));
+		ServerPlayNetworking.registerGlobalReceiver(Payloads.CrtVolume.TYPE, (p, ctx) -> with(ctx.server(), s -> s.crt.onVolume(ctx.player(), p.crtId(), p.percent())));
+		ServerPlayNetworking.registerGlobalReceiver(Payloads.Unlink.TYPE, (p, ctx) -> with(ctx.server(), s -> s.unplug(ctx.player())));
+		net.fabricmc.fabric.api.entity.event.v1.ServerPlayerEvents.AFTER_RESPAWN.register((old, np, alive) -> {
+			GbaServer s = instance;
+			if (s != null) s.onClientReady(np);
+		});
 		ServerPlayNetworking.registerGlobalReceiver(Payloads.CrtStreamC2S.TYPE, (p, ctx) -> CrtServer.fastStream(ctx.player().connection, p));
 		ServerPlayNetworking.registerGlobalReceiver(Payloads.CrtClose.TYPE, (p, ctx) -> with(ctx.server(), s -> s.crt.onCrtClose(ctx.player(), p.crtId())));
 		ServerPlayNetworking.registerGlobalReceiver(Payloads.CrtNeedKeyframe.TYPE, (p, ctx) -> with(ctx.server(), s -> s.crt.onNeedKeyframe(ctx.player(), p.crtId())));
@@ -421,7 +428,7 @@ public final class GbaServer {
 		rebuildRoutes();
 		for (LinkRooms.Update<UUID> u : updates) {
 			sendRoom(u.room());
-			for (UUID id : u.released()) { np.remove(id); sendLinkState(id, EffectiveLink.State.UNPLUGGED, List.of()); }
+			for (UUID id : u.released()) { np.remove(id); sendLinkState(id, EffectiveLink.State.UNPLUGGED, List.of()); sendCable(id); }
 			// cabled but not running a GBA: tell them how to join
 			for (UUID id : u.room()) {
 				if (!sessions.containsKey(id)) hintId(id, "Cable linked - open your GBA to join the link");
@@ -442,7 +449,7 @@ public final class GbaServer {
 
 	private boolean canNetplay(UUID id) {
 		Integer caps = clientCaps.get(id);
-		return caps != null && (caps & Payloads.Hello.CAP_NETPLAY) != 0;
+		return caps != null && (caps & Payloads.Hello.CAP_NETPLAY_LOCKSTEP) != 0;
 	}
 
 	private void sendRoom(List<UUID> room) {
@@ -463,6 +470,7 @@ public final class GbaServer {
 		for (Map.Entry<UUID, EffectiveLink.State> e : states.entrySet()) {
 			sendLinkState(e.getKey(), e.getValue(), e.getValue().plugged() ? names : List.of());
 		}
+		for (UUID id : room) sendCable(id);
 		updateNetplay(room, activeMembers, netplay, false);
 	}
 
@@ -526,6 +534,40 @@ public final class GbaServer {
 	private String nameOf(UUID id) {
 		ServerPlayer sp = server.getPlayerList().getPlayer(id);
 		return sp == null ? "?" : sp.getName().getString();
+	}
+
+	/** A client announced itself (Hello) or respawned: tell it the audio range and who it is cabled to. */
+	private void onClientReady(ServerPlayer p) {
+		if (ServerPlayNetworking.canSend(p, Payloads.CrtAudioRange.TYPE)) {
+			ServerPlayNetworking.send(p, new Payloads.CrtAudioRange(CrtServer.config.effectiveAudioDistance()));
+		}
+		sendCable(p.getUUID());
+	}
+
+	/** Tell one player who is on their cable (also with no GBA open); a client without cable_state support is skipped. */
+	private void sendCable(UUID id) {
+		ServerPlayer sp = server.getPlayerList().getPlayer(id);
+		if (sp == null || !ServerPlayNetworking.canSend(sp, Payloads.CableState.TYPE)) return;
+		List<UUID> room = rooms.room(id);
+		if (room.size() < 2) {
+			ServerPlayNetworking.send(sp, Payloads.CableState.NONE);
+			return;
+		}
+		List<String> names = new ArrayList<>();
+		List<Boolean> open = new ArrayList<>();
+		for (UUID m : room) { names.add(nameOf(m)); open.add(hasSession(m)); }
+		ServerPlayNetworking.send(sp, new Payloads.CableState(room.indexOf(id), names, open));
+	}
+
+	/** The player takes themselves off the cable (Unlink button / key / /gba unlink); the others are told. Returns false if not linked. */
+	boolean unplug(ServerPlayer p) {
+		UUID id = p.getUUID();
+		if (!rooms.isLinked(id)) return false;
+		List<UUID> others = new ArrayList<>(rooms.room(id));
+		others.remove(id);
+		unlink(id);
+		for (UUID o : others) hintId(o, p.getName().getString() + " unplugged the link cable.");
+		return true;
 	}
 
 	private void sendLinkState(UUID id, EffectiveLink.State st, List<String> names) {
@@ -694,7 +736,7 @@ public final class GbaServer {
 					ctx.getSource().sendFailure(Component.literal("You are not linked to anyone"));
 					return 0;
 				}
-				s.unlink(p.getUUID());
+				s.unplug(p);
 				ctx.getSource().sendSuccess(() -> Component.literal("Link cable removed"), false);
 				return 1;
 			}))

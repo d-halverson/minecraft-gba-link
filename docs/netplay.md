@@ -1,4 +1,4 @@
-# Netplay link (0.4.0)
+# Netplay link (0.4.0, lockstep since 0.4.2)
 
 Linked games run at full speed over the internet when everybody has a Game Pak with the **same game**.
 
@@ -19,7 +19,7 @@ Linked games run at full speed over the internet when everybody has a Game Pak w
 
 ## How it works (short)
 
-Every client simulates every linked console, wired together with no latency, on one thread. Only the controller buttons are sent
+Every client simulates every linked console on one thread, joined by mGBA's own multiplayer link code (the same code mGBA's multiplayer windows use, which Pokemon Emerald's Cable Club accepts), stepped in a fixed order so all clients stay identical. Only the controller buttons are sent
 over the network (a few bytes per frame). A frame only runs when everybody's buttons for it are known. Because the
 emulator is deterministic, all clients stay identical. When a client starts, everybody sends their console's state so all
 clients start from the same point (a few hundred KB, compressed), and the cartridge clock (Pokemon Emerald has one) is
@@ -35,5 +35,6 @@ consoles are sent to everyone to repair it.
   for a light game).
 * Only your own console's save is uploaded to the server.
 * The cartridge clock shows the server's local time while linked (it is virtual and advances with emulated time).
-* Netplay needs the native library of this version (API 2); the mod ships it.
+* Netplay needs the native library of this version (API 3); the mod ships it. Players on 0.4.1 or older cannot join netplay with 0.4.2 players (the link is then classic).
+* mGBA's link code only models Normal-mode (Game Boy style) cables loosely: the master reads 0xFFFFFFFF back. Multiplayer mode (Pokemon, most GBA games) is complete.
 * `-Dgbalink.relaydelay=25` on a dev server adds 25 ms to every relayed packet, to test with a bad connection.
