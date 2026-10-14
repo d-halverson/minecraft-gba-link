@@ -37,7 +37,7 @@ public final class RomPickerScreen extends Screen {
 			int idx = page * perPage + i;
 			if (idx >= roms.size()) break;
 			RomLibrary.Rom r = roms.get(idx);
-			String label = r.name() + (r.code().isEmpty() ? "" : "  [" + r.code() + "]");
+			String label = r.name() + (r.code().isEmpty() ? "" : "  [" + r.code() + "]") + "  #" + com.drew.gba.client.GbaLinkClient.romId(r.sha1());
 			addRenderableWidget(Button.builder(Component.literal(label), b -> burn(r)).bounds(x, y + i * 24, w, 20).build());
 		}
 		int by = y + perPage * 24 + 6;

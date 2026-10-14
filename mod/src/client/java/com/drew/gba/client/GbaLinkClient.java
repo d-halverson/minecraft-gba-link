@@ -15,6 +15,7 @@ import com.drew.gba.save.SuspendFile;
 import com.mojang.blaze3d.platform.InputConstants;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.item.v1.ItemTooltipCallback;
 import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
@@ -47,12 +48,28 @@ public class GbaLinkClient implements ClientModInitializer {
 	private static int linkIndex, linkCount;
 	private static List<String> linkNames = List.of();
 
+	/** Short, comparable ROM identity: the first 8 hex digits of its SHA-1. */
+	public static String romId(String sha1) {
+		return sha1 == null || sha1.length() < 8 ? "?" : sha1.substring(0, 8).toLowerCase(java.util.Locale.ROOT);
+	}
+
 	@Override
 	public void onInitializeClient() {
 		RomLibrary.init(FabricLoader.getInstance().getGameDir());
 		RomLibrary.ensureFolders(); // gbalink/roms (+README) and gbalink/imports exist from the first start
 		// Dev-only end-to-end scenario driver. Completely inert (class never loaded) without the property.
 		if (System.getProperty("gbalink.autotest") != null) AutoTest.start();
+
+		// ROM ID (first 8 hex digits of the ROM's SHA-1) on paks and loaded GBAs, so players can check they have the
+		// same ROM before linking (netplay needs it).
+		ItemTooltipCallback.EVENT.register((stack, context, flag, lines) -> {
+			com.drew.gba.server.PakData pak = GbaItems.is(stack, GbaItems.PAK) ? GbaItems.pakOf(stack)
+				: GbaItems.is(stack, GbaItems.GBA) ? GbaItems.insertedPak(stack) : null;
+			if (pak == null) return;
+			if (GbaItems.is(stack, GbaItems.GBA) && !pak.title().isEmpty())
+				lines.add(Component.literal("Game: " + pak.title()).withStyle(net.minecraft.ChatFormatting.GRAY));
+			lines.add(Component.literal("ROM ID: " + romId(pak.sha1())).withStyle(net.minecraft.ChatFormatting.DARK_GRAY));
+		});
 
 		burnKey = KeyMappingHelper.registerKeyMapping(new KeyMapping("key.gbalink.burn", InputConstants.KEY_G,
 			KeyMapping.Category.register(Identifier.fromNamespaceAndPath("gbalink", "main"))));

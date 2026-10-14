@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.1
+
+* When a link falls back to the classic mode (players have different ROMs), a clear message says so:
+  "Different games: slow link, may fail over the internet. Use the same ROM for full speed." The status line reads
+  `Link (different games — slow, may fail online)`.
+* **ROM ID**: Game Pak tooltips (and a GBA with a pak inserted) show `ROM ID: xxxxxxxx`, the first 8 hex digits of the
+  ROM's SHA-1, and the burn picker lists it next to each game. Compare ROM IDs with your friends before linking: the same
+  ROM ID means full-speed netplay.
+
 ## 0.4.0
 
 * **Import .sav in the emulator** (replaces "Burn with existing save..."). There is an **Import .sav** button next to

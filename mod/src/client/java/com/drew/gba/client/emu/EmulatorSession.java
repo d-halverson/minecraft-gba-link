@@ -76,6 +76,9 @@ public final class EmulatorSession implements Runnable {
 	private final NetplayController netplay;
 	/** The server's last link_state, so the classic cable can be restored when netplay ends. */
 	private volatile int lastLinkMode;
+	/** Shown once each time a link falls back to the classic (lockstep) mode. */
+	static final String CLASSIC_WARNING = "Different games: slow link, may fail over the internet. Use the same ROM for full speed.";
+	private volatile boolean classicWarned;
 	private volatile boolean netplayExpected, netplayActive;
 	private long lastSaveNanos;
 	private volatile String toast = "";
@@ -200,6 +203,9 @@ public final class EmulatorSession implements Runnable {
 
 	/** link_state from the server. mode NETPLAY: the cable is handled by NetplayController once netplay_start arrives. */
 	public void onLinkState(int index, int count, List<String> names, int mode) {
+		boolean classicNow = mode != Payloads.LinkState.MODE_NETPLAY && count >= 2;
+		if (classicNow && !classicWarned) toast(CLASSIC_WARNING, 8000);
+		classicWarned = classicNow;
 		lastLinkMode = mode;
 		netplayExpected = mode == Payloads.LinkState.MODE_NETPLAY && count >= 2;
 		commands.add(() -> {
@@ -291,7 +297,7 @@ public final class EmulatorSession implements Runnable {
 		if (link.timedOut()) return "Link: partner not responding - cable unplugged";
 		if (c < 2) return "Link: not connected";
 		String names = String.join(", ", link.names());
-		String head = lastLinkMode == Payloads.LinkState.MODE_NETPLAY ? "Link" : "Link (different games \u2014 slow mode)";
+		String head = lastLinkMode == Payloads.LinkState.MODE_NETPLAY ? "Link" : "Link (different games \u2014 slow, may fail online)";
 		return (link.waiting() ? head + ": waiting for partner... " : head + ": ") + "P" + (i + 1) + " of " + c + " - " + names;
 	}
 
