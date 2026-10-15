@@ -40,9 +40,20 @@ public final class GbaScreen extends Screen {
 		this.controls = new SessionControls(session, new SessionControls.Host() {
 			@Override public Screen screen() { return GbaScreen.this; }
 			@Override public void importStarting() { childOpen = true; } // the child screens return here; removed() must not suspend the game
-			@Override public void closeAfterPowerOff() { onClose(); }
-			@Override public void leave() { onClose(); }
+			@Override public void powerOffNow() { session.powerOff(); closeNow(); }
+			@Override public void closeNow() { GbaScreen.this.closeNow(); }
 		});
+	}
+
+	/** Esc / Close: asks first while linked (see {@link SessionControls#requestLeave}). */
+	@Override
+	public void onClose() {
+		if (controls == null) closeNow();
+		else controls.requestLeave(this::closeNow);
+	}
+
+	private void closeNow() {
+		super.onClose();
 	}
 
 	/** Message-only mode (missing ROM, missing native library, ...). */
@@ -111,7 +122,7 @@ public final class GbaScreen extends Screen {
 	@Override
 	public boolean keyPressed(KeyEvent event) {
 		if (session == null) return super.keyPressed(event);
-		if (GbaKeys.press(session, event.key(), () -> { session.powerOff(); onClose(); })) return true;
+		if (GbaKeys.press(session, event.key(), controls::requestPowerOff)) return true;
 		if (controls.volumeKey(event.key()) || controls.unlinkKey(event)) return true;
 		return super.keyPressed(event);
 	}
@@ -271,7 +282,10 @@ public final class GbaScreen extends Screen {
 		if (childOpen) { childOpen = false; return; } // only switching to the import screens
 		if (closed) return;
 		closed = true;
-		if (controls != null) controls.flush();
+		if (controls != null) {
+			controls.flush();
+			controls.endSession(); // Minecraft's volume back to what it was
+		}
 		if (session != null) {
 			session.requestStop(); // suspends in the background; the ack needs this thread, so never block on it
 			if (texture != null) {

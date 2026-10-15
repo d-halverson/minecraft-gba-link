@@ -201,8 +201,17 @@ back in your off hand.
 
 **Volume.** The left wheel is the **GBA volume** (emulator and CRT sound, saved in `config/gbalink-client.properties`,
 independent of Minecraft's master volume); the right wheel is Minecraft's own master volume (the same setting as
-Options > Music & Sounds). While you are cabled, a small indicator in the top-right corner shows who you are linked to
+Options > Music & Sounds) but only **while you play**: Minecraft's volume is remembered when the GBA or CRT screen opens
+and put back (and `options.txt` saved) when it closes, however it closes. The wheel's hover text says
+"MC 40% (while playing)". Opening the import picker or a confirmation does not count as closing. While you are cabled, a small indicator in the top-right corner shows who you are linked to
 and the state of the link.
+
+**Leaving a link.** While you are linked (netplay or classic, or still connecting), leaving ends the link for everyone
+and Pokemon shows "Communication error" on both sides, so `Esc`, the Close / Leave button, the power switch and `P` first
+ask "You're linked with X. Leaving now disconnects the link cable ... Leave anyway?" with **Stay** (default; `Esc` or
+`Enter` also stay) and **Leave**. The game and the link keep running behind the popup (GBA keys are ignored). When you are
+not linked nothing is asked. Unlink first (`U`) if you only want out of the cable. Disconnecting from the server or
+quitting Minecraft cannot be asked.
 
 **Suspend and power switch.** Closing the GBA screen (`Esc` or the Close button) does not turn the console
 off: it uploads your battery save to the server and writes a *suspend state* to
@@ -273,7 +282,7 @@ too (with the optional resource pack) but only players with the mod can play or 
   | Power off | `P` |
   | Options panel (save/load state, export/import, power switch, volume wheels, Unlink, Leave) | `O` or the **Options** button (top right) |
   | Volume: GBA / Minecraft | `-` `=` / `[` `]` |
-  | Leave (suspends the game like closing the GBA) | `Esc` |
+  | Leave (suspends the game like closing the GBA; asks first while linked, see *Leaving a link*) | `Esc` |
 
   Saves, suspend states and link cables work the same. One player at a time per TV.
 * **Watch.** Modded players within 48 blocks see the live picture on the TV and hear it (low quality, about 8 KB/s).

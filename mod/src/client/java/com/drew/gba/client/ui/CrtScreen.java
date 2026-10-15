@@ -55,8 +55,8 @@ public final class CrtScreen extends Screen {
 		this.controls = new SessionControls(session, new SessionControls.Host() {
 			@Override public Screen screen() { return CrtScreen.this; }
 			@Override public void importStarting() { childOpen = true; } // the import screens return here; removed() must not leave the TV
-			@Override public void closeAfterPowerOff() { onClose(); }
-			@Override public void leave() { onClose(); }
+			@Override public void powerOffNow() { session.powerOff(); closeNow(); }
+			@Override public void closeNow() { CrtScreen.this.closeNow(); }
 		});
 		open = this;
 	}
@@ -67,7 +67,7 @@ public final class CrtScreen extends Screen {
 		if (s != null && s.crtId.equals(crtId) && s.minecraft != null) s.minecraft.execute(() -> {
 			s.childOpen = false;
 			if (s.minecraft.gui.screen() != s) { s.removed(); s.minecraft.gui.setScreen(null); } // an import screen is on top
-			else s.onClose();
+			else s.closeNow(); // forced: no confirmation
 		});
 	}
 
@@ -148,7 +148,7 @@ public final class CrtScreen extends Screen {
 	@Override
 	public boolean keyPressed(KeyEvent event) {
 		if (menuKey(event.key())) return true;
-		if (GbaKeys.press(session, event.key(), this::powerOff)) return true;
+		if (GbaKeys.press(session, event.key(), controls::requestPowerOff)) return true;
 		if (controls.volumeKey(event.key()) || controls.unlinkKey(event)) return true;
 		return super.keyPressed(event); // Esc closes
 	}
@@ -183,9 +183,14 @@ public final class CrtScreen extends Screen {
 		return super.keyReleased(event);
 	}
 
-	private void powerOff() {
-		session.powerOff();
-		onClose();
+	/** Esc / Leave: asks first while linked (see {@link SessionControls#requestLeave}). */
+	@Override
+	public void onClose() {
+		controls.requestLeave(this::closeNow);
+	}
+
+	private void closeNow() {
+		super.onClose();
 	}
 
 	@Override
@@ -288,6 +293,7 @@ public final class CrtScreen extends Screen {
 		if (closed) return;
 		closed = true;
 		controls.flush();
+		controls.endSession(); // Minecraft's volume back to what it was
 		hud.restore(minecraft);
 		if (open == this) open = null;
 		session.requestStop();

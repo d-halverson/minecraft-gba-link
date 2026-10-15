@@ -35,6 +35,7 @@ public final class VolumeKnob {
 
 	final Kind kind;
 	private int cx, top;
+	boolean hideLabel; // set by SessionControls while the other wheel shows its long readout over this label
 	private boolean dragging;
 	private double acc;
 	private long flashUntil;
@@ -56,7 +57,10 @@ public final class VolumeKnob {
 		p = ClientConfig.clampPercent(p);
 		if (p == percent()) return;
 		if (kind == Kind.GBA) ClientConfig.setGbaVolume(p);
-		else Minecraft.getInstance().options.getSoundSourceOptionInstance(SoundSource.MASTER).set(p / 100.0);
+		else { // live only: options.txt is written when the session screen closes (see VolumeRestore), never mid-game
+			Minecraft.getInstance().options.getSoundSourceOptionInstance(SoundSource.MASTER).set(p / 100.0);
+			return;
+		}
 		dirty = true;
 		saveAt = System.currentTimeMillis() + 500;
 	}
@@ -78,7 +82,12 @@ public final class VolumeKnob {
 
 	/** "GBA volume 80%" while the last key / scroll change is fresh, else "". */
 	String freshText() {
-		return System.currentTimeMillis() < flashUntil ? (kind == Kind.GBA ? "GBA" : "Minecraft") + " volume " + percent() + "%" : "";
+		return System.currentTimeMillis() < flashUntil ? (kind == Kind.GBA ? "GBA volume " + percent() + "%" : mcText(percent())) : "";
+	}
+
+	/** The MC wheel's readout: Minecraft's volume goes back to what it was when the GBA / CRT closes. */
+	static String mcText(int percent) {
+		return "MC " + percent + "% (while playing)";
 	}
 
 	/** Dev autotest only: make the knob think the pointer is at (x, y). */
@@ -99,11 +108,24 @@ public final class VolumeKnob {
 	void render(GuiGraphicsExtractor g, Font font, int mouseX, int mouseY) {
 		boolean active = active(mouseX, mouseY);
 		int p = percent();
-		String text = active ? p + "%" : kind.label;
+		String text = active ? (kind == Kind.MC ? mcText(p) : p + "%") : kind.label;
 		int tw = font.width(text), rowW = 10 + 3 + tw;
 		int x0 = cx - rowW / 2;
+		if (kind == Kind.MC && active) x0 = Math.max(3, Math.min(x0, g.guiWidth() - 3 - rowW)); // the long readout stays on screen
+		int col = active ? READOUT : LABEL;
+		if (hideLabel) { // the neighbouring wheel's long readout takes this row: draw only the wheel
+			int ph = ((int) Math.floor(p / 100.0 * TURNS * PHASES) % PHASES + PHASES) % PHASES;
+			GuiSprites.sprite(g, "wheel_" + kind.sprite + "_" + (PHASES - ph) % PHASES, cx, wheelCenterY(), W, WHEEL_H);
+			return;
+		}
 		GuiSprites.sprite(g, kind.icon, x0 + 5, top + 5, 10, 10);
-		g.text(font, text, x0 + 13, top + 1, active ? READOUT : LABEL, false);
+		int cut = text.indexOf(" (");
+		if (cut < 0) {
+			g.text(font, text, x0 + 13, top + 1, col, false);
+		} else { // "MC 40%" then the dimmer " (while playing)"
+			g.text(font, text.substring(0, cut), x0 + 13, top + 1, col, false);
+			g.text(font, text.substring(cut), x0 + 13 + font.width(text.substring(0, cut)), top + 1, 0xFFB8A878, false);
+		}
 		int phase = ((int) Math.floor(p / 100.0 * TURNS * PHASES) % PHASES + PHASES) % PHASES;
 		GuiSprites.sprite(g, "wheel_" + kind.sprite + "_" + (PHASES - phase) % PHASES, cx, wheelCenterY(), W, WHEEL_H);
 		if (active) { // a thin accent frame around the slot
@@ -157,6 +179,5 @@ public final class VolumeKnob {
 		if (!dirty) return;
 		dirty = false;
 		if (kind == Kind.GBA) ClientConfig.save();
-		else Minecraft.getInstance().options.save();
 	}
 }

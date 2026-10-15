@@ -198,6 +198,21 @@ public final class EmulatorSession implements Runnable {
 	public int linkIndex() { return link.index(); }
 	public boolean linkTimedOut() { return link.timedOut(); }
 
+	/** True while leaving would break a link: netplay running or starting, or a classic link with 2+ consoles that still answers. */
+	public boolean linkActive() {
+		return com.drew.gba.client.ui.LeaveGuard.needsConfirm(finished, netplayActive, netplayExpected, link.count(), link.timedOut());
+	}
+
+	/** The other players on this link (cable state first, the classic link's names as a fallback). */
+	public List<String> linkPartners() {
+		List<String> p = com.drew.gba.client.ClientCable.partners();
+		if (!p.isEmpty()) return p;
+		List<String> out = new java.util.ArrayList<>();
+		List<String> all = link.names();
+		for (int i = 0; i < all.size(); i++) if (i != link.index()) out.add(all.get(i));
+		return out;
+	}
+
 	public void onLinkState(int index, int count, List<String> names) {
 		onLinkState(index, count, names, Payloads.LinkState.MODE_CLASSIC);
 	}

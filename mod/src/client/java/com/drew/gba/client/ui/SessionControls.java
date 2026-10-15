@@ -25,10 +25,10 @@ public final class SessionControls {
 		Screen screen();
 		/** The screen is about to be replaced by the import screens: do not suspend the game when it is removed. */
 		void importStarting();
-		/** Power switch: the screen closes after {@link EmulatorSession#powerOff()}. */
-		void closeAfterPowerOff();
-		/** Leave / close the screen (suspends). */
-		void leave();
+		/** Power off (switch / P key), after the leave confirmation: {@link #requestPowerOff} runs this once confirmed. */
+		void powerOffNow();
+		/** Close the screen for real (suspends), skipping the confirmation. */
+		void closeNow();
 	}
 
 	static final int SW_W = 40, SW_H = 14;
@@ -45,6 +45,7 @@ public final class SessionControls {
 	SessionControls(EmulatorSession session, Host host) {
 		this.session = session;
 		this.host = host;
+		beginSession();
 	}
 
 	// ------------------------------------------------------------------ buttons
@@ -72,7 +73,7 @@ public final class SessionControls {
 	}
 
 	Button leave(String label, int x, int y, int w, int h) {
-		return Button.builder(Component.literal(label), b -> host.leave()).bounds(x, y, w, h).build();
+		return Button.builder(Component.literal(label), b -> requestLeave(host::closeNow)).bounds(x, y, w, h).build();
 	}
 
 	/** Import flow: picker -> confirmation -> the session restarts from the imported save. The game keeps running behind. */
@@ -82,6 +83,28 @@ public final class SessionControls {
 		session.turbo = false;
 		host.importStarting();
 		ImportConfirmScreen.begin(host.screen(), session);
+	}
+
+	// ------------------------------------------------------------------ leaving
+
+	/**
+	 * Runs {@code doLeave} at once when not linked; while linked first asks "Leave anyway?" (the game keeps running
+	 * behind the popup). Every way out of the session screen goes through here.
+	 */
+	void requestLeave(Runnable doLeave) {
+		if (!session.linkActive()) {
+			doLeave.run();
+			return;
+		}
+		session.releaseAll(); // the popup swallows the key releases
+		session.turbo = false;
+		host.importStarting(); // a child screen opens over ours: removed() must not suspend the game
+		net.minecraft.client.Minecraft.getInstance().gui.setScreen(new LeaveLinkScreen(host.screen(), session.linkPartners(), doLeave));
+	}
+
+	/** Power switch or P key. */
+	void requestPowerOff() {
+		requestLeave(host::powerOffNow);
 	}
 
 	// ------------------------------------------------------------------ power switch
@@ -128,6 +151,7 @@ public final class SessionControls {
 
 	void renderKnobs(GuiGraphicsExtractor g, Font font, int mouseX, int mouseY) {
 		int mx = (int) pointerX(mouseX, mouseY), my = (int) pointerY(mouseX, mouseY);
+		gba.hideLabel = mc.active(mx, my); // MC's "(while playing)" readout is wider than its wheel and covers the GBA label
 		gba.render(g, font, mx, my);
 		mc.render(g, font, mx, my);
 	}
@@ -137,8 +161,7 @@ public final class SessionControls {
 	boolean mouseClicked(MouseButtonEvent e) {
 		if (e.button() != InputConstants.MOUSE_BUTTON_LEFT) return false;
 		if (overSwitch(e.x(), e.y())) {
-			session.powerOff();
-			host.closeAfterPowerOff();
+			requestPowerOff();
 			return true;
 		}
 		return gba.mouseClicked(e.x(), e.y()) || mc.mouseClicked(e.x(), e.y());
@@ -193,4 +216,26 @@ public final class SessionControls {
 		gba.flush();
 		mc.flush();
 	}
+
+	// ------------------------------------------------------------------ Minecraft volume: restored when the session screen closes
+
+	/** Snapshots Minecraft's master volume (the first session screen to open). Pair with {@link #endSession}. */
+	void beginSession() {
+		MC_VOLUME.begin(this);
+	}
+
+	/** The session screen is really closing: put Minecraft's master volume back and save options.txt. */
+	void endSession() {
+		MC_VOLUME.end(this);
+	}
+
+	/** Client stopping: restore if a session screen was still open. */
+	public static void restoreMcVolumeNow() {
+		MC_VOLUME.endAll();
+	}
+
+	private static final VolumeRestore MC_VOLUME = new VolumeRestore(
+		() -> net.minecraft.client.Minecraft.getInstance().options.getSoundSourceOptionInstance(net.minecraft.sounds.SoundSource.MASTER).get(),
+		v -> net.minecraft.client.Minecraft.getInstance().options.getSoundSourceOptionInstance(net.minecraft.sounds.SoundSource.MASTER).set(v),
+		() -> net.minecraft.client.Minecraft.getInstance().options.save());
 }

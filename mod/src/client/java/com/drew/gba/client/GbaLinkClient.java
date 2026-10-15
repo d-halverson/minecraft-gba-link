@@ -136,7 +136,10 @@ public class GbaLinkClient implements ClientModInitializer {
 				ClientPlayNetworking.send(new Payloads.Hello(Payloads.PROTOCOL, netplayCaps()));
 			}
 		});
+		net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents.CLIENT_STOPPING.register(client ->
+			com.drew.gba.client.ui.SessionControls.restoreMcVolumeNow()); // quitting while a GBA / CRT screen is open
 		ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
+			com.drew.gba.client.ui.SessionControls.restoreMcVolumeNow(); // (the screen's removed() does it too; this is the belt)
 			ClientCable.reset();
 			CrtClient.reset();
 			EmulatorSession s = current;

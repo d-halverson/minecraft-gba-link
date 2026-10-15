@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.3
+
+* **Confirm before leaving a link.** While you are linked (netplay or classic, or still connecting), leaving the GBA or
+  the CRT ends the link for everyone and Pokemon shows "Communication error" on both sides. Esc, the Close / Leave
+  buttons, the power switch and the `P` key now first show "You're linked with X. Leaving now disconnects the link cable
+  and the game will show a communication error. Leave anyway?" with **Stay** (default; Esc or Enter in the popup also
+  stay) and **Leave**. The emulator and the link keep running while it is shown (nothing is paused), GBA keys are ignored,
+  and on the CRT the HUD stays hidden. Not linked: no popup, as before. Disconnecting from the server or quitting
+  Minecraft cannot be prompted.
+* **Minecraft volume is restored when you close.** The MC wheel still changes Minecraft's master volume live, but only
+  for the time you play: the volume is snapshotted when the GBA / CRT screen opens and put back (and `options.txt`
+  saved) when it closes by any path (Esc, Close, power off, leave, disconnect, quitting). The changed volume is not
+  written to `options.txt` while playing, so a crash leaves the original. Sub-screens (import picker, confirmations,
+  the CRT Options panel) do not count as closing. The GBA wheel stays persistent. Hover text: "MC 40% (while playing)".
+* New unit tests (`LeaveAndRestoreTest`); the `lvA`/`lvB` dev autotest scenarios cover both in game.
+
 ## 0.4.2
 
 * **Volume wheels** on the GBA bezel: **GBA** volume (game sound, saved per player in

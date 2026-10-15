@@ -72,7 +72,7 @@ public final class AutoTest {
 		this.dir = mc.gameDirectory.toPath().resolve("autotest");
 		String sp = System.getProperty("gbalink.autotest.sync");
 		this.sync = sp == null ? dir.resolve("sync") : Path.of(sp);
-		this.romName = System.getProperty("gbalink.autotest.rom", mode.startsWith("ui") ? "tone.gba" : mode.startsWith("crt") && !mode.equals("crtmodel") ? "shades.gba" : mode.equals("qol") ? "counter.gba" : mode.equals("solo") ? "sram.gba" : mode.startsWith("np") || mode.startsWith("nc") ? "link_pokesim.gba" : "link_n32_" + (mode.equals("A") ? "master" : "slave") + ".gba");
+		this.romName = System.getProperty("gbalink.autotest.rom", mode.startsWith("ui") ? "tone.gba" : mode.startsWith("crt") && !mode.equals("crtmodel") ? "shades.gba" : mode.equals("qol") ? "counter.gba" : mode.equals("solo") ? "sram.gba" : mode.startsWith("np") || mode.startsWith("nc") || mode.startsWith("lv") ? "link_pokesim.gba" : "link_n32_" + (mode.equals("A") ? "master" : "slave") + ".gba");
 	}
 
 	public static void start() {
@@ -174,7 +174,7 @@ public final class AutoTest {
 			done.get(15, TimeUnit.SECONDS);
 			log("screenshot screenshots/" + name + ".png");
 			copyEvidence(mc.gameDirectory.toPath().resolve("screenshots").resolve(name + ".png"),
-				name.startsWith("crt_") ? name + ".png" : mc.getUser().getName() + "_" + romName.replace(".gba", "") + "_" + name + ".png");
+				name.startsWith("crt_") || name.startsWith("v043_") ? name + ".png" : mc.getUser().getName() + "_" + romName.replace(".gba", "") + "_" + name + ".png");
 		} catch (Exception e) {
 			fail("screenshot " + name + ": " + e);
 		}
@@ -355,11 +355,22 @@ public final class AutoTest {
 		check(true, "GBA screen open and emulating");
 	}
 
+	/** v0.4.3: leaving while linked asks first; older scenarios that leave on purpose confirm with Leave. */
+	private void confirmLeave() {
+		sleep(300);
+		var pop = main(() -> mc.gui.screen() instanceof com.drew.gba.client.ui.LeaveLinkScreen p ? p : null);
+		if (pop == null) return;
+		int[] lc = main(pop::leaveButtonCenter);
+		log("leave popup shown; confirming Leave");
+		clickScreen(pop, lc[0], lc[1]);
+	}
+
 	private void closeGba() {
 		EmulatorSession s = GbaLinkClient.currentSession();
 		GbaScreen sc = gbaScreen();
 		if (sc == null) fail("no GBA screen to close");
 		main(() -> sc.keyPressed(new KeyEvent(InputConstants.KEY_ESCAPE, 256, 0))); // real Esc handling
+		confirmLeave();
 		waitFor("screen closed", 5000, () -> mc.gui.screen() == null);
 		waitFor("session finished", 5000, s::isFinished);
 	}
@@ -393,7 +404,7 @@ public final class AutoTest {
 			else if (mode.equals("uiA") || mode.equals("uiB")) ui042();
 			else if (mode.equals("qol")) qol();
 			else if (mode.equals("solo")) solo();
-			else if (mode.startsWith("np") || mode.startsWith("nc")) netplayScenario();
+			else if (mode.startsWith("np") || mode.startsWith("nc") || mode.startsWith("lv")) netplayScenario();
 			else link();
 			log("SCENARIO COMPLETE: " + mode);
 		} catch (Fail f) {
@@ -646,6 +657,7 @@ public final class AutoTest {
 			awaitSignal("B.done", 240000);
 			CrtScreen cs2 = main(() -> mc.gui.screen() instanceof CrtScreen c ? c : null);
 			main(() -> cs2.keyPressed(new KeyEvent(InputConstants.KEY_ESCAPE, 256, 0)));
+			confirmLeave();
 			waitFor("screen closed", 5000, () -> mc.gui.screen() == null);
 			sleep(1000);
 		} else {
@@ -859,6 +871,7 @@ public final class AutoTest {
 		// leave with Esc: suspends like closing the GBA
 		EmulatorSession ses = GbaLinkClient.currentSession();
 		main(() -> cs.keyPressed(new KeyEvent(InputConstants.KEY_ESCAPE, 256, 0)));
+		confirmLeave();
 		waitFor("screen closed", 5000, () -> mc.gui.screen() == null);
 		waitFor("session finished", 8000, ses::isFinished);
 		sleep(1500);
@@ -1072,6 +1085,7 @@ public final class AutoTest {
 		if (c == null) fail("power switch not drawn");
 		log("clicking power switch at " + c[0] + "," + c[1]);
 		main(() -> sc.mouseClicked(new MouseButtonEvent(c[0], c[1], new MouseButtonInfo(1, 0)), false));
+		confirmLeave();
 		waitFor("screen closed", 5000, () -> mc.gui.screen() == null);
 		waitFor("session finished", 8000, s::isFinished);
 	}
@@ -1289,6 +1303,7 @@ public final class AutoTest {
 	private void netplayScenario() {
 		boolean a = mode.endsWith("A");
 		boolean classic = mode.startsWith("nc");
+		boolean lv = mode.startsWith("lv"); // v0.4.3: leave confirmation + Minecraft volume restore, instead of the measurement
 		String other = mode.substring(0, 2) + (a ? "B" : "A");
 		String tag = classic ? "classic" : "netplay";
 		boolean crt = !a && System.getProperty("gbalink.autotest.crtB") != null; // B plays on a CRT TV
@@ -1317,6 +1332,7 @@ public final class AutoTest {
 		}
 		awaitSignal(mode.substring(0, 2) + "A.cabled", 60000);
 		sleep(500);
+		if (lv) main(() -> mc.options.getSoundSourceOptionInstance(net.minecraft.sounds.SoundSource.MASTER).set(0.8));
 		if (crt) playCrt(tv); else openGba();
 		EmulatorSession s = GbaLinkClient.currentSession();
 		if (classic) waitFor("classic link up", 30000, () -> s.linkStatus().contains("different games"));
@@ -1324,6 +1340,11 @@ public final class AutoTest {
 		log("link up: " + s.linkStatus());
 		signal(mode + ".open1");
 		awaitSignal(other + ".open1", 60000);
+		if (lv) {
+			sleep(4000);
+			leaveAndVolume(a, crt, s);
+			return;
+		}
 		sleep(8000); // settle: delay adaptation, ROM warm-up
 		long[] c0 = counters(s);
 		int f0 = s.frames.seq();
@@ -1350,6 +1371,7 @@ public final class AutoTest {
 				sleep(500);
 				if (crt) {
 					main(() -> mc.gui.screen().onClose());
+					confirmLeave();
 					waitFor("CRT screen closed", 5000, () -> mc.gui.screen() == null);
 					waitFor("session finished", 8000, s::isFinished);
 				} else closeGba();
@@ -1368,8 +1390,157 @@ public final class AutoTest {
 		sleep(500);
 		if (crt) {
 			main(() -> { if (mc.gui.screen() != null) mc.gui.screen().onClose(); });
+			confirmLeave();
 			sleep(1000);
 		} else if (gbaScreen() != null) closeGba();
+	}
+
+	// ------------------------------------------------------------------ v0.4.3: leave confirmation + Minecraft volume restore
+
+	private double masterVolume() {
+		return main(() -> (double) mc.options.getSoundSourceVolume(net.minecraft.sounds.SoundSource.MASTER));
+	}
+
+	/** The master volume as written in options.txt, or -1. */
+	private double optionsFileMaster() {
+		try {
+			for (String l : Files.readAllLines(mc.gameDirectory.toPath().resolve("options.txt"))) {
+				if (l.startsWith("soundCategory_master:")) return Double.parseDouble(l.substring("soundCategory_master:".length()).trim());
+			}
+		} catch (Exception ignored) {
+		}
+		return -1;
+	}
+
+	private void key(net.minecraft.client.gui.screens.Screen sc, int key) {
+		main(() -> sc.keyPressed(new KeyEvent(key, 0, 0)));
+		main(() -> sc.keyReleased(new KeyEvent(key, 0, 0)));
+	}
+
+	private void clickScreen(net.minecraft.client.gui.screens.Screen sc, int x, int y) {
+		main(() -> sc.mouseClicked(new MouseButtonEvent(x, y, new MouseButtonInfo(InputConstants.MOUSE_BUTTON_LEFT, 0)), false));
+	}
+
+	private void v043Shot(String name) {
+		main(() -> { mc.gui.hud.getChat().clearMessages(true); mc.gui.toastManager().clear(); });
+		sleep(500);
+		shot("v043_" + name);
+	}
+
+	/**
+	 * Both clients linked in netplay (A on a GBA, B on a GBA or CRT), master volume 80% before opening.
+	 * Phase 1 (both): MC wheel to ~40%, Esc -> popup (link keeps running), GBA keys ignored, Stay, Esc again -> Stay by Esc in the popup.
+	 * Phase 2: B leaves through the popup (volume restored); A is alone, unlinks, opens/closes the import picker (no restore),
+	 * then Esc closes at once and the volume is back.
+	 */
+	private void leaveAndVolume(boolean a, boolean crt, EmulatorSession s) {
+		String me = a ? "A" : "B";
+		net.minecraft.client.gui.screens.Screen sc = main(() -> mc.gui.screen());
+		check(Math.abs(masterVolume() - 0.8) < 0.011, me + ": master volume 80% before playing (" + masterVolume() + ")");
+		SessionControls ctl = main(() -> sc instanceof GbaScreen g ? g.controls() : ((CrtScreen) sc).controls());
+		if (crt) main(() -> ((CrtScreen) sc).setPanelOpen(true));
+		sleep(500);
+		int kx = main(() -> ctl.mc.centerX()), ky = main(() -> ctl.mc.wheelCenterY());
+		for (int i = 0; i < 8; i++) main(() -> sc.mouseScrolled(kx, ky, 0, -1)); // 8 notches of -5
+		main(() -> ctl.debugPointer(kx, ky));
+		sleep(500);
+		check(Math.abs(masterVolume() - 0.4) < 0.011, me + ": MC wheel took the master volume to 40% (" + masterVolume() + ")");
+		check(Math.abs(optionsFileMaster() - 0.4) > 0.02, me + ": options.txt is not rewritten while playing (" + optionsFileMaster() + ")");
+		v043Shot("mc_wheel_hover_" + me);
+		main(() -> ctl.debugPointer(1, 1));
+
+		// ---- linked: Esc shows the popup, the link keeps running
+		boolean hudHidden = main(() -> mc.gui.hud.isHidden());
+		long[] c0 = counters(s);
+		int f0 = s.frames.seq();
+		String st0 = s.linkStatsLine();
+		key(sc, InputConstants.KEY_ESCAPE);
+		waitFor("leave popup", 3000, () -> mc.gui.screen() instanceof com.drew.gba.client.ui.LeaveLinkScreen);
+		check(true, me + ": Esc while linked shows the leave popup");
+		com.drew.gba.client.ui.LeaveLinkScreen pop = main(() -> (com.drew.gba.client.ui.LeaveLinkScreen) mc.gui.screen());
+		check(s.netplay().running() && !s.isFinished(), me + ": emulator and netplay still running under the popup");
+		check(main(() -> mc.gui.hud.isHidden()) == hudHidden, me + ": HUD state unchanged by the popup (hidden=" + hudHidden + ")");
+		key(pop, InputConstants.KEY_X); // would be GBA A
+		key(pop, InputConstants.KEY_Z);
+		key(pop, InputConstants.KEY_LEFT);
+		check(s.heldMask() == 0, me + ": GBA keys are ignored while the popup is shown");
+		check(Math.abs(masterVolume() - 0.4) < 0.011, me + ": opening the popup does not restore the volume (" + masterVolume() + ")");
+		sleep(3500);
+		v043Shot("leave_popup_" + me);
+		long[] c1 = counters(s);
+		int f1 = s.frames.seq();
+		log("popup open: frames " + f0 + " -> " + f1 + ", exchanges good " + c0[0] + " -> " + c1[0] + " bad " + c0[1] + " -> " + c1[1]
+			+ " missed " + c0[2] + " -> " + c1[2] + " | stats before: " + st0 + " | after: " + s.linkStatsLine());
+		check(f1 - f0 > 100 && c1[0] + c1[1] + c1[2] > c0[0] + c0[1] + c0[2] + 100, me + ": frames and link exchanges kept advancing under the popup");
+		// Stay by Esc inside the popup
+		key(pop, InputConstants.KEY_ESCAPE);
+		waitFor("back on the session screen", 3000, () -> mc.gui.screen() == sc);
+		check(s.netplay().running(), me + ": Stay (Esc) keeps the link running");
+		sleep(1500);
+		long[] c2 = counters(s);
+		check(c2[0] + c2[1] + c2[2] > c1[0] + c1[1] + c1[2] && s.frames.seq() > f1, me + ": exchanges still advancing after Stay (" + c1[0] + " -> " + c2[0] + ")");
+		v043Shot("after_stay_" + me);
+		// Stay by the button
+		key(sc, InputConstants.KEY_ESCAPE);
+		waitFor("leave popup again", 3000, () -> mc.gui.screen() instanceof com.drew.gba.client.ui.LeaveLinkScreen);
+		com.drew.gba.client.ui.LeaveLinkScreen pop2 = main(() -> (com.drew.gba.client.ui.LeaveLinkScreen) mc.gui.screen());
+		key(pop2, InputConstants.KEY_RETURN); // Stay is the default focus
+		waitFor("back on the session screen (Enter = Stay)", 3000, () -> mc.gui.screen() == sc);
+		check(Math.abs(masterVolume() - 0.4) < 0.011 && s.netplay().running(), me + ": Enter in the popup = Stay; volume untouched");
+		// the other ways out also ask: the Close / Leave button, the power switch, the P key
+		for (String how : new String[] {"button", "power switch", "P key"}) {
+			if (how.equals("button")) clickWidget(crt ? "Leave" : "Close");
+			else if (how.equals("P key")) key(sc, InputConstants.KEY_P);
+			else {
+				if (crt) continue; // (the CRT panel's switch is checked by the P key)
+				int[] pc = main(() -> ((GbaScreen) sc).powerSwitchCenter());
+				clickScreen(sc, pc[0], pc[1]);
+			}
+			waitFor("leave popup via " + how, 3000, () -> mc.gui.screen() instanceof com.drew.gba.client.ui.LeaveLinkScreen);
+			check(!s.isPoweredOff() && s.netplay().running(), me + ": " + how + " while linked shows the popup and has not powered off");
+			key(main(() -> mc.gui.screen()), InputConstants.KEY_ESCAPE);
+			waitFor("back on the session screen (" + how + ")", 3000, () -> mc.gui.screen() == sc);
+		}
+		signal("lv." + me + ".stay");
+		awaitSignal("lv." + (a ? "B" : "A") + ".stay", 120000);
+
+		if (!a) {
+			// ---- B leaves through the popup
+			key(sc, InputConstants.KEY_ESCAPE);
+			waitFor("leave popup (B)", 3000, () -> mc.gui.screen() instanceof com.drew.gba.client.ui.LeaveLinkScreen);
+			com.drew.gba.client.ui.LeaveLinkScreen pop3 = main(() -> (com.drew.gba.client.ui.LeaveLinkScreen) mc.gui.screen());
+			int[] lc = main(pop3::leaveButtonCenter);
+			clickScreen(pop3, lc[0], lc[1]);
+			waitFor("screen closed", 5000, () -> mc.gui.screen() == null);
+			waitFor("session finished", 8000, s::isFinished);
+			check(true, me + ": Leave closes the screen and ends the session");
+			check(Math.abs(masterVolume() - 0.8) < 0.011, me + ": master volume back to 80% after Leave (" + masterVolume() + ")");
+			check(Math.abs(optionsFileMaster() - 0.8) < 0.011, me + ": options.txt saved with 80% (" + optionsFileMaster() + ")");
+			check(main(() -> mc.gui.hud.isHidden()) == (hudHidden && !crt) || !crt, me + ": HUD restored after leaving the CRT");
+			signal("lv.bleft");
+			return;
+		}
+		awaitSignal("lv.bleft", 60000);
+		waitFor("A back to standalone", 20000, () -> !s.netplay().active());
+		main(() -> ClientCable.requestUnlink(mc));
+		waitFor("A unlinked", 10000, () -> !ClientCable.linked());
+		check(!s.linkActive(), "A: no active link any more");
+		// the import picker is a sub-screen: it must not count as closing
+		clickWidget("Import .sav");
+		waitFor("import picker", 5000, () -> mc.gui.screen() instanceof com.drew.gba.client.ui.SavePickerScreen);
+		sleep(600);
+		check(Math.abs(masterVolume() - 0.4) < 0.011, "A: opening the import picker does not restore the volume (" + masterVolume() + ")");
+		v043Shot("import_picker_volume_still_40");
+		main(() -> mc.gui.screen().onClose());
+		waitFor("back on the GBA screen", 5000, () -> mc.gui.screen() == sc);
+		check(Math.abs(masterVolume() - 0.4) < 0.011 && !s.isFinished(), "A: back from the picker: volume still 40%, game still running");
+		// not linked: Esc closes at once
+		key(sc, InputConstants.KEY_ESCAPE);
+		waitFor("screen closed", 3000, () -> mc.gui.screen() == null);
+		check(true, "A: Esc while not linked closes immediately (no popup)");
+		waitFor("session finished", 8000, s::isFinished);
+		check(Math.abs(masterVolume() - 0.8) < 0.011, "A: master volume back to 80% after closing (" + masterVolume() + ")");
+		check(Math.abs(optionsFileMaster() - 0.8) < 0.011, "A: options.txt saved with 80% (" + optionsFileMaster() + ")");
 	}
 
 	/** Place the CRT item on the floor 6 blocks east, insert the burned pak (sneak-use with the pak in the off hand). */
