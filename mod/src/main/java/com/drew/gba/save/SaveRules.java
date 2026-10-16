@@ -38,11 +38,35 @@ public final class SaveRules {
 		return false;
 	}
 
-	/** @return null if {@code len} is an acceptable save size for import, otherwise a player-facing reason */
+	/** Cartridge RAM sizes of Game Boy / Game Boy Color games (MBC2 512 B, 2, 8, 32, 64 and 128 KiB). */
+	public static final int[] GB_BASE_SIZES = {512, 2 * 1024, 8 * 1024, 32 * 1024, 64 * 1024, 128 * 1024};
+	/** Largest clock footer a Game Boy .sav can carry after the RAM (MBC3 RTC 44 or 48 bytes, HuC3, TAMA5). */
+	public static final int GB_MAX_FOOTER = 255;
+
+	/** Game Boy save: one of the RAM sizes, optionally followed by a clock footer of up to {@link #GB_MAX_FOOTER} bytes. */
+	public static boolean isTypicalGbSize(int len) {
+		for (int base : GB_BASE_SIZES) if (len >= base && len <= base + GB_MAX_FOOTER) return true;
+		return false;
+	}
+
+	/** @return null if {@code len} is an acceptable GBA save size for import, otherwise a player-facing reason */
 	public static String validateImportSize(long len) {
+		return validateImportSize(len, "gba");
+	}
+
+	/**
+	 * @param system "gba", "gb" or "gbc" (anything else counts as gba)
+	 * @return null if {@code len} is an acceptable save size for import into a game of that system, otherwise a player-facing reason
+	 */
+	public static String validateImportSize(long len, String system) {
+		boolean gb = "gb".equals(system) || "gbc".equals(system);
 		if (len <= 0) return "The save file is empty";
 		if (len > MAX_SAVE) return "The save file is too large (max 512 KiB)";
-		if (!isTypicalSize((int) len)) {
+		if (gb) {
+			if (!isTypicalGbSize((int) len)) {
+				return "Not a Game Boy save: " + len + " bytes (expected 512 B, 2, 8, 32, 64 or 128 KiB, optionally followed by a clock footer)";
+			}
+		} else if (!isTypicalSize((int) len)) {
 			return "Not a GBA save: " + len + " bytes (expected 512 B, 8, 32, 64 or 128 KiB, optionally +16 bytes RTC)";
 		}
 		return null;
@@ -66,8 +90,14 @@ public final class SaveRules {
 	 * @param romSha1 SHA-1 of the ROM about to be loaded
 	 */
 	public static Resume decide(SuspendFile suspend, boolean unreadable, String serverRevision, String romSha1) {
+		return decide(suspend, unreadable, serverRevision, romSha1, null);
+	}
+
+	/** Same, also checking the system ("gba", "gb", "gbc"): a suspend state of another system is invalid. {@code system == null} skips the check. */
+	public static Resume decide(SuspendFile suspend, boolean unreadable, String serverRevision, String romSha1, String system) {
 		if (unreadable) return Resume.DISCARD_INVALID;
 		if (suspend == null) return Resume.NONE;
+		if (system != null && !suspend.system().equals(system)) return Resume.DISCARD_INVALID;
 		if (serverRevision == null || serverRevision.isEmpty()) return Resume.DISCARD_CHANGED; // unknown: be safe
 		if (!suspend.romSha1().equalsIgnoreCase(romSha1)) return Resume.DISCARD_INVALID;
 		// Equal revisions mean byte-identical saves, whether or not the upload was ever acknowledged.
@@ -80,8 +110,13 @@ public final class SaveRules {
 	 * @return null if accepted, otherwise the reason
 	 */
 	public static String importRejection(boolean hasOpenSession, long length) {
+		return importRejection(hasOpenSession, length, "gba");
+	}
+
+	/** Same, for a cartridge of the given system ("gba", "gb" or "gbc"). */
+	public static String importRejection(boolean hasOpenSession, long length, String system) {
 		if (!hasOpenSession) return "Imports are only accepted while you have this cartridge open";
-		return validateImportSize(length);
+		return validateImportSize(length, system);
 	}
 
 	public static String safeFileName(String s) {

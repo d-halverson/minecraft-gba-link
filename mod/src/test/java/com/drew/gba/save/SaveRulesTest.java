@@ -86,6 +86,56 @@ class SaveRulesTest {
 	}
 
 	@Test
+	void gameBoySaveSizes() {
+		for (int base : SaveRules.GB_BASE_SIZES) {
+			assertNull(SaveRules.validateImportSize(base, "gb"), "base " + base);
+			assertNull(SaveRules.validateImportSize(base + 48, "gbc"), "mbc3 clock footer " + base);
+			assertNull(SaveRules.validateImportSize(base + 44, "gb"), "old VBA footer " + base);
+			assertNotNull(SaveRules.validateImportSize(base - 1, "gb"));
+			assertNotNull(SaveRules.validateImportSize(base + 256, "gb"));
+		}
+		assertTrue(SaveRules.validateImportSize(12345, "gb").contains("Game Boy"));
+		assertNotNull(SaveRules.validateImportSize(0, "gbc"));
+		assertNotNull(SaveRules.validateImportSize(512 * 1024 + 1, "gbc"));
+		assertNull(SaveRules.validateImportSize(2048, "gbc"), "a 2 KiB save is fine for Game Boy but not GBA");
+		assertNotNull(SaveRules.validateImportSize(2048, "gba"));
+		assertNull(SaveRules.validateImportSize(32768, null), "no system means GBA");
+		assertNull(SaveRules.importRejection(true, 8192 + 48, "gb"));
+		assertNotNull(SaveRules.importRejection(false, 8192, "gb"));
+		assertNotNull(SaveRules.importRejection(true, 1000, "gbc"));
+	}
+
+	@Test
+	void suspendFileRecordsTheSystem() throws Exception {
+		SuspendFile gb = new SuspendFile("r".repeat(64), "c".repeat(40), true, new byte[] {1, 2}, "gbc");
+		SuspendFile back = SuspendFile.decode(gb.encode());
+		assertNotNull(back);
+		assertEquals("gbc", back.system());
+		assertEquals("gba", suspend("r", "c").system(), "default system is gba");
+		assertEquals(SaveRules.Resume.RESUME, SaveRules.decide(gb, false, gb.revision(), gb.romSha1(), "gbc"));
+		assertEquals(SaveRules.Resume.DISCARD_INVALID, SaveRules.decide(gb, false, gb.revision(), gb.romSha1(), "gba"));
+		assertEquals(SaveRules.Resume.RESUME, SaveRules.decide(gb, false, gb.revision(), gb.romSha1()), "no system given: not checked");
+		// a version 1 file (written by 0.4.x) still decodes, as a GBA suspend state
+		java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+		java.io.DataOutputStream o = new java.io.DataOutputStream(bo);
+		o.writeInt(0x47425353);
+		o.writeByte(1);
+		o.writeUTF("rev");
+		o.writeUTF("c".repeat(40));
+		o.writeBoolean(true);
+		o.writeInt(3);
+		o.write(new byte[] {9, 8, 7});
+		SuspendFile old = SuspendFile.decode(bo.toByteArray());
+		assertNotNull(old);
+		assertEquals("gba", old.system());
+		assertArrayEquals(new byte[] {9, 8, 7}, old.state());
+		// unknown future versions are not guessed at
+		byte[] future = gb.encode();
+		future[4] = 9;
+		assertNull(SuspendFile.decode(future));
+	}
+
+	@Test
 	void fileNames() {
 		assertEquals("Pokemon Emerald", SaveRules.safeFileName("Pokemon Emerald"));
 		assertEquals("a_b_c", SaveRules.safeFileName("a/b\\c"));

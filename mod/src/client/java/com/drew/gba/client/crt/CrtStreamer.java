@@ -69,7 +69,7 @@ public final class CrtStreamer implements Runnable {
 		if (now - lastOffer < MIN_FRAME_GAP_NANOS) return;
 		lastOffer = now;
 		synchronized (lock) {
-			frames.copyTo(pending);
+			frames.copyLetterboxed(pending); // Game Boy pictures are letterboxed into the 240x160 stream canvas (see SPEC.md)
 			hasFrame = true;
 			lock.notifyAll();
 		}

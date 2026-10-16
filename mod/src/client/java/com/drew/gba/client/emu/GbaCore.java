@@ -6,8 +6,6 @@ import java.lang.foreign.ValueLayout;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 
-import static com.drew.gba.client.emu.GbaNative.HEIGHT;
-import static com.drew.gba.client.emu.GbaNative.WIDTH;
 
 /**
  * One emulator core. Not thread safe: every method must be called from the single emulator thread
@@ -70,11 +68,32 @@ public final class GbaCore implements AutoCloseable {
 		try { return (int) n.runFrame.invokeExact(core); } catch (Throwable t) { throw wrap(t); }
 	}
 
-	/** Copy the 240x160 RGBA framebuffer into dst (length 153600). */
+	/** {@link GbaNative#PLATFORM_GBA} or {@link GbaNative#PLATFORM_GB} (Game Boy and Game Boy Color); always GBA for a library older than API 4. */
+	public int platform() {
+		if (n.platform == null) return GbaNative.PLATFORM_GBA;
+		try { return (int) n.platform.invokeExact(core); } catch (Throwable t) { throw wrap(t); }
+	}
+
+	public boolean isGameBoy() { return platform() == GbaNative.PLATFORM_GB; }
+
+	/** Width of the picture the core produces: 240 (GBA) or 160 (Game Boy). Valid for the loaded ROM. */
+	public int frameWidth() {
+		if (n.frameWidth == null) return GbaNative.WIDTH;
+		try { return (int) n.frameWidth.invokeExact(core); } catch (Throwable t) { throw wrap(t); }
+	}
+
+	/** Height of the picture the core produces: 160 (GBA) or 144 (Game Boy). */
+	public int frameHeight() {
+		if (n.frameHeight == null) return GbaNative.HEIGHT;
+		try { return (int) n.frameHeight.invokeExact(core); } catch (Throwable t) { throw wrap(t); }
+	}
+
+	/** Copy the RGBA framebuffer ({@link #frameWidth()} x {@link #frameHeight()} x 4 bytes) into dst, which must be at least that long. */
 	public void copyFramebuffer(byte[] dst) {
 		try {
-			MemorySegment fb = ((MemorySegment) n.framebuffer.invokeExact(core)).reinterpret((long) WIDTH * HEIGHT * 4);
-			MemorySegment.copy(fb, ValueLayout.JAVA_BYTE, 0, dst, 0, WIDTH * HEIGHT * 4);
+			long bytes = (long) frameWidth() * frameHeight() * 4;
+			MemorySegment fb = ((MemorySegment) n.framebuffer.invokeExact(core)).reinterpret(bytes);
+			MemorySegment.copy(fb, ValueLayout.JAVA_BYTE, 0, dst, 0, (int) bytes);
 		} catch (Throwable t) { throw wrap(t); }
 	}
 

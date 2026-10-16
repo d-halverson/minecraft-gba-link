@@ -1,5 +1,6 @@
 package com.drew.gba.client.ui;
 
+import com.drew.gba.client.ControlMap;
 import com.drew.gba.client.emu.EmulatorSession;
 import com.mojang.blaze3d.platform.InputConstants;
 
@@ -10,38 +11,44 @@ public final class GbaKeys {
 
 	private GbaKeys() {}
 
+	/** The GBA button bit a key is bound to (see {@link ControlMap}, Controls screen), or -1. */
 	public static int bitFor(int key) {
-		return switch (key) {
-			case InputConstants.KEY_RIGHT -> RIGHT;
-			case InputConstants.KEY_LEFT -> LEFT;
-			case InputConstants.KEY_UP -> UP;
-			case InputConstants.KEY_DOWN -> DOWN;
-			case InputConstants.KEY_X -> A;
-			case InputConstants.KEY_Z -> B;
-			case InputConstants.KEY_A -> L;
-			case InputConstants.KEY_S -> R;
-			case InputConstants.KEY_RETURN, 88 /* keypad enter */ -> START;
-			case InputConstants.KEY_BACKSPACE -> SELECT;
-			default -> -1;
-		};
+		return ControlMap.get().bitFor(key);
 	}
 
-	/** Handles a key press; returns true if it was consumed. {@code powerOff} runs for the P key. */
+	/** Display name of the key bound to an action ("F5", "Enter", "-" when unbound). */
+	public static String keyName(ControlMap.Action a) {
+		return keyName(ControlMap.get().primary(a));
+	}
+
+	public static String keyName(int key) {
+		if (key == ControlMap.NONE) return "-";
+		try {
+			return InputConstants.Type.KEYBOARD.getOrCreate(key).getDisplayName().getString();
+		} catch (RuntimeException e) {
+			return "Key " + key;
+		}
+	}
+
+	/** Handles a key press; returns true if it was consumed. {@code powerOff} runs for the power key. */
 	public static boolean press(EmulatorSession s, int key, Runnable powerOff) {
-		int bit = bitFor(key);
-		if (bit >= 0) { s.press(bit); return true; }
-		if (key == InputConstants.KEY_F5) { s.saveStateAsync(); return true; }
-		if (key == InputConstants.KEY_F8) { s.loadStateAsync(); return true; }
-		if (key == InputConstants.KEY_P) { powerOff.run(); return true; }
-		// Space (and Tab) = fast-forward while held
-		if (key == InputConstants.KEY_SPACE || key == InputConstants.KEY_TAB) { s.turbo = true; return true; }
-		return false;
+		ControlMap.Action a = ControlMap.get().actionFor(key);
+		if (a == null) return false;
+		switch (a) {
+			case SAVE_STATE -> s.saveStateAsync();
+			case LOAD_STATE -> s.loadStateAsync();
+			case POWER -> powerOff.run();
+			case TURBO -> s.turbo = true; // fast-forward while held
+			default -> s.press(a.bit);
+		}
+		return true;
 	}
 
 	public static boolean release(EmulatorSession s, int key) {
-		int bit = bitFor(key);
-		if (bit >= 0) { s.release(bit); return true; }
-		if (key == InputConstants.KEY_SPACE || key == InputConstants.KEY_TAB) { s.turbo = false; return true; }
+		ControlMap.Action a = ControlMap.get().actionFor(key);
+		if (a == null) return false;
+		if (a == ControlMap.Action.TURBO) { s.turbo = false; return true; }
+		if (a.bit >= 0) { s.release(a.bit); return true; }
 		return false;
 	}
 }

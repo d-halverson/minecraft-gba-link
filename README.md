@@ -1,16 +1,55 @@
 # GBA Link
 
-Play Game Boy Advance games inside Minecraft, and link up with friends using a Link Cable.
+Play Game Boy Advance, Game Boy and Game Boy Color games inside Minecraft, and link up with friends using a Link Cable (GBA games).
 A Fabric mod for **Minecraft 26.3**, built on the [mGBA](https://mgba.io/) emulator core.
 
 ![The in-game Game Boy Advance screen](docs/screenshot.png)
 
 ![The CRT TV with the console and controller](docs/crt-tv.png)
 
+## Screenshots
+
+Real captures from the dev client with real cartridges (not included in this repo).
+
+![Pokemon Emerald on the GBA screen, in the Pokemon Center](docs/img/emerald-gba-screen.png)
+
+*Pokemon Emerald running on the GBA screen (after Continue, standing in a Pokemon Center).*
+
+![Pokemon Red on the GBA screen](docs/img/pokemon-red-gba-screen.png)
+
+*Pokemon Red (Game Boy) on the same screen: 10:9 picture, green LCD palette, "GB" tag. This is the start of a new game (the player's bedroom), not a late-game save.*
+
+![Pokemon Emerald on a CRT TV seen by a spectator](docs/img/crt-tv-spectator.png)
+
+*Emerald on the CRT TV, seen by a second player standing nearby (the viewer needs no ROM).*
+
+![The CRT options panel with the Controls button](docs/img/crt-options-panel.png)
+
+*The CRT TV's Options panel (top right) with the new Controls button, as seen by the player.*
+
+![The Controls screen](docs/img/controls-screen.png)
+
+*The Controls screen (key map). Everything is at its default except **A**, which was rebound to `Q` in the capture to show a change being saved.*
+
+Two players linked with a cable (netplay, both running Pokemon Emerald with their own save) in the Cable Club:
+
+![Both players seated at the Trade Center table](docs/img/emerald-link-trade-center.png)
+
+*Both players' characters at the Trade Center table (one client's GBA screen; the status line shows "Link: P1 of 2 - netplay").*
+
+![Choosing a Pokemon to trade](docs/img/emerald-link-trade-select.png)
+
+*The Cable Club trade screen, with both players' parties shown ("Choose a POKeMON"). Both save files happen to use the same trainer name.*
+
+![Trade menu (Summary / Trade)](docs/img/emerald-link-trade-menu.png)
+
+*One player opening the Summary / Trade menu for a party member. The actual exchange of Pokemon was not completed in this capture session.*
+
 ## What it is
 
 * **A playable GBA in your inventory.** Craft a Game Boy Advance, burn a game onto a Blank Game Pak,
-  insert it, and play in a GBA-shaped screen with sound.
+  insert it, and play in a GBA-shaped screen with sound. The same console and the same pak also play
+  **Game Boy (`.gb`) and Game Boy Color (`.gbc`) games** (see [Supported systems](#supported-systems)).
 * **A CRT TV.** Craft a big wooden TV cabinet with a console and controller built in, place it in the world, and play
   on the TV itself while friends nearby watch the picture and hear the sound (see [CRT TV](#crt-tv)).
 * **Real link cable support.** Use a Link Cable on a friend and play multiplayer GBA games together
@@ -25,6 +64,22 @@ A Fabric mod for **Minecraft 26.3**, built on the [mGBA](https://mgba.io/) emula
   need a BIOS file either.)
 
 Works on Windows (x64), macOS (Intel and Apple Silicon) and Linux (x64).
+
+## Supported systems
+
+| System | ROM files in `gbalink/roms/` | Notes |
+| --- | --- | --- |
+| Game Boy Advance | `.gba` | everything the mod did before, including the link cable and netplay |
+| Game Boy Color | `.gbc` (or a `.gb` with the colour flag) | mGBA's normal colours, **no colour correction** is applied |
+| Game Boy (monochrome) | `.gb` | drawn with a classic **green LCD palette** (`#E0F8D0 #88C070 #346856 #081820`) instead of plain grey |
+
+The system is read from the ROM's header, not from the file name: a Game Boy ROM needs the Nintendo logo and a valid header
+checksum and may be at most 8 MiB; a GBA ROM needs its fixed header byte and may be at most 32 MiB. Files that fail these checks
+are listed with the reason in the burn screen. Super Game Boy borders are off (Super Game Boy games run as plain Game Boy
+games, 160x144). **Link cable support for Game Boy games is coming later**: with a Game Boy or Game Boy Color game open
+the status says "Link cable for Game Boy games isn't supported yet" and you behave as unlinked (other players keep linking
+among themselves). Battery saves (including the real-time clock of Pokémon Gold / Silver / Crystal cartridges), save states,
+suspend / power switch, `.sav` export / import, the CRT TV and its viewers all work for Game Boy games.
 
 ## Which file do I need?
 
@@ -139,7 +194,7 @@ The mod creates all of these **automatically the first time you launch Minecraft
 
 | Folder in `gbalink/` | What goes in it |
 | --- | --- |
-| `roms/` | **Put your `.gba` games here** (a `README.txt` explains it) |
+| `roms/` | **Put your `.gba`, `.gb` and `.gbc` games here** (a `README.txt` explains it) |
 | `imports/` | **Put `.sav` files here** to import them into a cartridge |
 | `exports/` | Saves written by *Export .sav*, and the automatic backup made before every import |
 | `saves/` | Automatic local copy of each pak's last uploaded save |
@@ -153,7 +208,7 @@ The mod creates all of these **automatically the first time you launch Minecraft
 
 ## Adding games
 
-Copy your own `.gba` files into `gbalink/roms/` (see [Folders](#folders)). The burn screen rescans the folder every time you open it, so there is no need to restart
+Copy your own `.gba`, `.gb` or `.gbc` files into `gbalink/roms/` (see [Folders](#folders)). The burn screen rescans the folder every time you open it, so there is no need to restart
 Minecraft.
 
 Games are matched by **SHA-1 of the ROM file**. When a Game Pak is burned, it remembers the checksum of
@@ -183,13 +238,16 @@ save file on the server.
 **sneak + right-click** to insert it. To eject, sneak + right-click with an empty off hand; the pak lands
 back in your off hand.
 
-**Play.** Right-click with the GBA (with a pak inserted) to open the console screen.
+**Play.** Right-click with the GBA (with a pak inserted) to open the console screen. Game Boy and Game Boy Color
+games use the same keys: D-pad, `X` = A, `Z` = B, `Enter` = Start, `Backspace` = Select (`A` / `S` do nothing). Their
+picture is drawn at its own aspect ratio (10:9) in the middle of the screen, as large as fits with whole-number scaling, and a small
+**GB** / **GBC** tag next to the title tells which kind of cartridge is in. The Game Pak tooltip also names the system.
 
 | GBA | Key |
 | --- | --- |
 | D-pad | Arrow keys |
 | A / B | `X` / `Z` |
-| L / R | `A` / `S` |
+| L / R | `A` / `S` (GBA only; Game Boy games have no shoulder buttons) |
 | Start / Select | `Enter` / `Backspace` |
 | Fast-forward (hold) | `Space` (or `Tab`) |
 | Save state / load state | `F5` / `F8` |
@@ -198,6 +256,15 @@ back in your off hand.
 | Export / import the save | buttons **Export .sav** / **Import .sav** under the screen |
 | GBA volume / Minecraft volume | `-` `=` / `[` `]`, or the two **volume wheels** on the bottom edge of the bezel (drag, or scroll over them) |
 | Unlink from the link cable | `U` (rebindable, works anywhere in game), or the **Unlink** button while cabled |
+
+**Controls (key map).** The keys above are the defaults. Press the **Controls** button (next to Export / Import on the GBA screen,
+in the Options panel on the CRT TV) to open the key map: every button (A, B, L, R, Start, Select, the D-pad, fast-forward, save
+state, load state, power off) with its key. Click a button and press the new key (`Esc` cancels; right-click a button to clear it).
+A key another button already has is swapped over to it, and `Esc`, the volume keys (`-` `=` `[` `]`) and the CRT menu keys
+`E` / `I` / `O` cannot be bound. **Reset to defaults** restores everything; **Done** (or `Esc`) goes back, and the game keeps
+running behind the screen, so the new keys apply as soon as you are back. The map is per player, in
+`gbalink/controls.properties` (delete the file to reset; a damaged file just means the defaults). The labels and hint
+lines on the buttons show the keys you chose. Game Boy / Game Boy Color games use the same map.
 
 **Volume.** The left wheel is the **GBA volume** (emulator and CRT sound, saved in `config/gbalink-client.properties`,
 independent of Minecraft's master volume); the right wheel is Minecraft's own master volume (the same setting as
@@ -234,7 +301,9 @@ Save states (F5 / F8) are an extra, local snapshot kept per pak on your own comp
 **Export a save.** Click **Export .sav** on the GBA screen (on a CRT: press `E`). It writes the current battery
 save to `gbalink/exports/<game>-<date>.sav`. These are the emulator's battery files, the same format other
 emulators (mGBA and others) use: 512 B or 8 KiB (EEPROM), 32 KiB (SRAM), 64 or 128 KiB (Flash). For games with a
-real-time clock mGBA appends a 16-byte clock footer; mGBA reads it, other emulators ignore or trim it.
+real-time clock mGBA appends a 16-byte clock footer; mGBA reads it, other emulators ignore or trim it. Game Boy
+and Game Boy Color games save the cartridge RAM (512 B, 2, 8, 32, 64 or 128 KiB), followed by a 48-byte clock footer for
+cartridges with a clock (the usual `.sav` format of mGBA and VBA).
 
 **Import a save.** Put a `.sav` file into `gbalink/imports/` (**Open imports folder** in the picker gets you there),
 open the game, and click **Import .sav** on the GBA screen (on a CRT: press `I`). Pick the file and confirm
@@ -246,9 +315,9 @@ open the game, and click **Import .sav** on the GBA screen (on a CRT: press `I`)
 3. any suspended game for that pak is discarded and the game restarts from the imported save (a cold boot), with an
    "Imported <file>" message.
 
-This replaces the old "Burn with existing save" option (0.2.0 to 0.3.0). Only the standard sizes (512 B, 8, 32, 64,
-128 KiB, each optionally plus 16 bytes of clock footer, never more than 512 KiB) are accepted, and the server only
-takes an import from the player who currently has that cartridge open.
+This replaces the old "Burn with existing save" option (0.2.0 to 0.3.0). Only the standard sizes (GBA: 512 B, 8, 32, 64,
+128 KiB, each optionally plus 16 bytes of clock footer; Game Boy: 512 B, 2, 8, 32, 64, 128 KiB, optionally plus a clock footer; never
+more than 512 KiB) are accepted, and the server only takes an import from the player who currently has that cartridge open.
 
 ## CRT TV
 
@@ -308,7 +377,8 @@ too (with the optional resource pack) but only players with the mod can play or 
 
 ## Link cable
 
-Hold a Link Cable and **right-click another player** who is within **16 blocks** and also has the mod.
+Hold a Link Cable and **right-click another player** who is within **16 blocks** and also has the mod. (GBA games only for now: a
+player with a Game Boy or Game Boy Color game open does not take part in the link yet, see [Supported systems](#supported-systems).)
 Up to **4 players** can share one cable room; use the cable on each additional friend. Then everyone
 **opens their GBA** (with a link-capable game, such as a trading or multiplayer menu) and the games find
 each other, just like real GBAs. You are disconnected if you wander out of range, or with `/gba unlink`.
@@ -376,7 +446,7 @@ when you push a tag like `v0.3.0`). On Windows, build the natives with WSL or le
 [`native/README.md`](native/README.md) for details and [`SPEC.md`](SPEC.md) for the design.
 
 The tests (`./gradlew test`, `native/run_tests.sh`) use only small homebrew ROMs generated by
-`native/tests/make_link_rom.py` and the MIT-licensed [jsmolka/gba-tests](https://github.com/jsmolka/gba-tests)
+`native/tests/make_link_rom.py` and `native/tests/make_gb_rom.py` (Game Boy / Game Boy Color) and the MIT-licensed [jsmolka/gba-tests](https://github.com/jsmolka/gba-tests)
 submodule.
 
 ## Known limitations
@@ -384,6 +454,10 @@ submodule.
 * **Netplay needs the same ROM** on every linked Game Pak; different games use the slower classic link.
   Netplay has a small input delay (2–10 frames, adaptive), and it has been tested with homebrew link
   ROMs and simulated ping, not yet with every commercial game. Please report games that desync.
+* **Game Boy and Game Boy Color:** single player only for now (no link cable, no netplay; a Game Boy link is planned). DMG games use a
+  fixed green palette (no choice of colours), Game Boy Color games get no colour correction, there are no Super Game Boy borders or
+  colours, and no GB / GBC BIOS is used. mGBA does not allow Left+Right or Up+Down at once. CRT TV and spectators show the Game Boy picture
+  letterboxed in the 240x160 canvas (centred 1:1, black bars) rather than scaled up.
 * **No Wireless Adapter**, GBA Player, JOY bus or UART mode. Only the cable modes (Normal 8/32-bit and
   Multiplayer, 2 to 4 players) are emulated. Normal mode with 3 to 4 players is only approximate.
 * **mGBA 0.10.5 accuracy:** very accurate for commercial games, but a few exotic hardware edge cases

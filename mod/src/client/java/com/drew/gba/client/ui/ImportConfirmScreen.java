@@ -24,7 +24,7 @@ public final class ImportConfirmScreen extends Screen {
 	/** Opens the save picker on top of {@code parent}; a valid pick leads to this confirmation; everything returns to {@code parent}. */
 	public static void begin(Screen parent, EmulatorSession session) {
 		net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getInstance();
-		mc.gui.setScreen(new SavePickerScreen(parent, (name, data) ->
+		mc.gui.setScreen(new SavePickerScreen(parent, session.system(), (name, data) ->
 			mc.gui.setScreen(new ImportConfirmScreen(parent, session, name, data))));
 	}
 

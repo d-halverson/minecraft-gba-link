@@ -31,6 +31,8 @@ public final class Payloads {
 		public static final int CAP_NETPLAY = 1;
 		/** 0.4.2: netplay simulated with mGBA lockstep groups (native API 3); not compatible with the 0.4.0/0.4.1 simulation (bit 0 only). */
 		public static final int CAP_NETPLAY_LOCKSTEP = 2;
+		/** 0.5.0: this client's native library can run Game Boy and Game Boy Color games (native API 4). */
+		public static final int CAP_GAMEBOY = 4;
 		public static final Type<Hello> TYPE = mkType("hello");
 		public static final StreamCodec<RegistryFriendlyByteBuf, Hello> CODEC = StreamCodec.ofMember(
 			(v, b) -> { b.writeVarInt(v.protocol); b.writeVarInt(v.caps); },
@@ -66,11 +68,20 @@ public final class Payloads {
 		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
 	}
 
-	public record Burn(String romSha1, String title, String gameCode) implements CustomPacketPayload {
+	/**
+	 * {@code system} (appended in 0.5.0, "gba" if absent): "gb" or "gbc" for Game Boy games. A client only appends the
+	 * field for Game Boy ROMs, so burning a GBA game stays byte-identical to protocol 4 of 0.4.x, and the server decodes
+	 * the old layout (no field) as a GBA game.
+	 */
+	public record Burn(String romSha1, String title, String gameCode, String system) implements CustomPacketPayload {
 		public static final Type<Burn> TYPE = mkType("burn");
 		public static final StreamCodec<RegistryFriendlyByteBuf, Burn> CODEC = StreamCodec.ofMember(
-			(v, b) -> { b.writeUtf(v.romSha1, 64); b.writeUtf(v.title, 64); b.writeUtf(v.gameCode, 16); },
-			b -> new Burn(b.readUtf(64), b.readUtf(64), b.readUtf(16)));
+			(v, b) -> {
+				b.writeUtf(v.romSha1, 64); b.writeUtf(v.title, 64); b.writeUtf(v.gameCode, 16);
+				if (!"gba".equals(v.system) && v.system != null && !v.system.isEmpty()) b.writeUtf(v.system, 8);
+			},
+			b -> new Burn(b.readUtf(64), b.readUtf(64), b.readUtf(16), b.isReadable() ? b.readUtf(8) : "gba"));
+		public Burn(String romSha1, String title, String gameCode) { this(romSha1, title, gameCode, "gba"); }
 		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
 	}
 

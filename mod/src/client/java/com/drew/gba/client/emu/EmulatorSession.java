@@ -36,7 +36,18 @@ public final class EmulatorSession implements Runnable {
 	/** Everything a session needs to start; built by GbaLinkClient.onOpen. */
 	public record Config(UUID pakId, String title, String romSha1, Path romPath, Path stateFile, Path suspendFile,
 			Path mirrorFile, Path exportDir, byte[] save, String serverRevision, byte[] resumeState, String startToast,
-			int linkIndex, int linkCount, List<String> linkNames) {}
+			int linkIndex, int linkCount, List<String> linkNames, String system) {
+		/** A GBA game (what every session was before 0.5.0). */
+		public Config(UUID pakId, String title, String romSha1, Path romPath, Path stateFile, Path suspendFile, Path mirrorFile,
+				Path exportDir, byte[] save, String serverRevision, byte[] resumeState, String startToast, int linkIndex, int linkCount,
+				List<String> linkNames) {
+			this(pakId, title, romSha1, romPath, stateFile, suspendFile, mirrorFile, exportDir, save, serverRevision, resumeState,
+				startToast, linkIndex, linkCount, linkNames, "gba");
+		}
+	}
+
+	/** Shown while cabled with a Game Boy / Game Boy Color game open (phase 1: no link cable for those games yet). */
+	public static final String GB_LINK_UNSUPPORTED = "Link cable for Game Boy games isn't supported yet";
 
 	public final UUID pakId;
 	public final String title;
@@ -45,6 +56,8 @@ public final class EmulatorSession implements Runnable {
 	private final Config cfg;
 	private final GbaNative natives;
 	private final byte[] initialSave;
+	/** "gba", "gb" or "gbc" (from the ROM's header, see RomHeader). */
+	private final String system;
 	public final FrameBuffer frames = new FrameBuffer();
 
 	private final Thread thread;
@@ -92,6 +105,7 @@ public final class EmulatorSession implements Runnable {
 		this.romPath = c.romPath();
 		this.stateFile = c.stateFile();
 		this.initialSave = c.save();
+		this.system = c.system() == null ? "gba" : c.system();
 		this.currentRev = c.serverRevision();
 		this.link = new LinkPump(m -> sendQuiet(new Payloads.LinkDataC2S(m)), System::nanoTime, LINK_TIMEOUT_NANOS,
 			() -> toast("Link partner not responding - cable unplugged"), c.linkIndex(), c.linkCount(), c.linkNames());
@@ -112,6 +126,12 @@ public final class EmulatorSession implements Runnable {
 	public void start() {
 		thread.start();
 	}
+
+	/** {@code gba}, {@code gb} or {@code gbc}. */
+	public String system() { return system; }
+
+	/** True for Game Boy and Game Boy Color games. */
+	public boolean isGameBoy() { return !"gba".equals(system); }
 
 	// ------------------------------------------------------------------ UI-thread API
 
@@ -189,6 +209,11 @@ public final class EmulatorSession implements Runnable {
 		});
 	}
 
+	/** Dev/test hook: the current battery save, read like the export does (does not lose the "needs upload" state). */
+	public java.util.concurrent.CompletableFuture<byte[]> debugSave() {
+		return debugRun(c -> readSave());
+	}
+
 	/** Dev/test hook: a copy of the current save state (EWRAM lives at 0x21000). */
 	public java.util.concurrent.CompletableFuture<byte[]> debugState() {
 		return debugRun(GbaCore::saveState);
@@ -219,23 +244,33 @@ public final class EmulatorSession implements Runnable {
 
 	/** link_state from the server. mode NETPLAY: the cable is handled by NetplayController once netplay_start arrives. */
 	public void onLinkState(int index, int count, List<String> names, int mode) {
+		if (isGameBoy()) { // no link cable for Game Boy games yet: always unplugged, whatever the server says
+			index = 0;
+			count = 0;
+			names = List.of();
+			mode = Payloads.LinkState.MODE_CLASSIC;
+		}
+		final int fIndex = index, fCount = count;
+		final List<String> fNames = names;
+		final int fMode = mode;
 		boolean classicNow = mode != Payloads.LinkState.MODE_NETPLAY && count >= 2;
 		if (classicNow && !classicWarned) toast(CLASSIC_WARNING, 8000);
 		classicWarned = classicNow;
 		lastLinkMode = mode;
 		netplayExpected = mode == Payloads.LinkState.MODE_NETPLAY && count >= 2;
 		commands.add(() -> {
-			if (mode == Payloads.LinkState.MODE_NETPLAY && count >= 2) {
+			if (fMode == Payloads.LinkState.MODE_NETPLAY && fCount >= 2) {
 				link.apply(0, 0, List.of()); // the classic cable stays unplugged; netplay_start follows
 				return;
 			}
 			leaveNetplay();
-			link.apply(index, count, names);
+			link.apply(fIndex, fCount, fNames);
 		});
 	}
 
 	/** netplay_start from the server: a (new) netplay session for this client. */
 	public void onNetplayStart(NetplayEngine.Params p) {
+		if (isGameBoy()) return; // never expected (the server leaves Game Boy games out of the link)
 		commands.add(() -> {
 			if (core == null) return;
 			link.apply(0, 0, List.of());
@@ -311,6 +346,7 @@ public final class EmulatorSession implements Runnable {
 	 * {@code classic link (different games)}, {@code connecting…}, or "" when the cable is not (yet) effectively linked.
 	 */
 	public String linkHudState() {
+		if (isGameBoy()) return com.drew.gba.client.ClientCable.linked() ? GB_LINK_UNSUPPORTED : "";
 		if (netplayActive) {
 			String st = netplay.statsLine();
 			java.util.regex.Matcher fps = java.util.regex.Pattern.compile("([0-9.]+) fps").matcher(st);
@@ -325,6 +361,7 @@ public final class EmulatorSession implements Runnable {
 	}
 
 	public String linkStatus() {
+		if (isGameBoy()) return com.drew.gba.client.ClientCable.linked() ? GB_LINK_UNSUPPORTED : "Link: not connected";
 		if (netplayActive) return netplay.statusLine();
 		if (netplayExpected) return "Connecting link...";
 		int c = link.count(), i = link.index();
@@ -375,6 +412,12 @@ public final class EmulatorSession implements Runnable {
 			audio.open();
 			core = new GbaCore(natives);
 			if (core.loadRom(romPath) < 0) throw new IllegalStateException("Could not load " + romPath.getFileName());
+			if (core.isGameBoy() != isGameBoy()) {
+				throw new IllegalStateException(isGameBoy()
+					? "The emulator library cannot run Game Boy games - update the GBA Link mod"
+					: romPath.getFileName() + " is not a GBA game");
+			}
+			if (isGameBoy() && com.drew.gba.client.ClientCable.linked()) toast(GB_LINK_UNSUPPORTED, 6000);
 			if (initialSave != null && initialSave.length > 0) {
 				if (core.loadSave(initialSave) < 0) LOG.warn("Core rejected save for pak {}", pakId);
 				else LOG.info("Loaded {} byte save for pak {}", initialSave.length, pakId);
@@ -435,7 +478,7 @@ public final class EmulatorSession implements Runnable {
 			link.deliverIncoming();
 			if (!runOneFrame()) break;
 			statsTick();
-			frames.publish(core::copyFramebuffer);
+			frames.publish(core);
 			com.drew.gba.client.crt.CrtStreamer st = streamer;
 			if (st != null) st.offerFrame(frames);
 			int got;
@@ -504,7 +547,7 @@ public final class EmulatorSession implements Runnable {
 
 	/** A netplay frame of the local console is ready: picture, sound (only this console's), CRT stream. */
 	private void netplayFrame(GbaCore local) {
-		frames.publish(local::copyFramebuffer);
+		frames.publish(local);
 		com.drew.gba.client.crt.CrtStreamer st = streamer;
 		if (st != null) st.offerFrame(frames);
 		int got;
@@ -600,7 +643,7 @@ public final class EmulatorSession implements Runnable {
 		byte[] st = core.saveState();
 		if (st == null) return;
 		try {
-			SaveStore.writeAtomic(cfg.suspendFile(), new SuspendFile(rev, cfg.romSha1(), revConfirmed, st).encode());
+			SaveStore.writeAtomic(cfg.suspendFile(), new SuspendFile(rev, cfg.romSha1(), revConfirmed, st, system).encode());
 			LOG.info("Suspended pak {} (revision {}, confirmed={})", pakId, rev.substring(0, Math.min(8, rev.length())), revConfirmed);
 		} catch (IOException e) {
 			LOG.warn("Could not write the suspend state {}", cfg.suspendFile(), e);
@@ -684,7 +727,7 @@ public final class EmulatorSession implements Runnable {
 	 * bak1..3), and on the server's ack discard the suspend state and cold-boot the core from the imported save.
 	 */
 	private void doImport(String fileName, byte[] data) {
-		String why = SaveRules.validateImportSize(data.length);
+		String why = SaveRules.validateImportSize(data.length, system);
 		if (why != null) { toast("Import failed: " + why, 5000); return; }
 		if (suppressNet) { toast("Import failed: not connected to the server", 5000); return; }
 		waitInflight(3000); // an earlier upload must not land after the import
@@ -727,6 +770,7 @@ public final class EmulatorSession implements Runnable {
 		core.close();
 		core = new GbaCore(natives);
 		if (core.loadRom(romPath) < 0) throw new IllegalStateException("Could not reload " + romPath.getFileName());
+		if (core.isGameBoy() != isGameBoy()) throw new IllegalStateException("The ROM changed its system while running");
 		if (core.loadSave(data) < 0) LOG.warn("Core rejected the imported save for pak {}", pakId);
 		link.bind(core);
 		link.apply(link.index(), link.count(), link.names());

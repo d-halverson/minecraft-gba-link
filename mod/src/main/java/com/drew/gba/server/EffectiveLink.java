@@ -20,6 +20,15 @@ public final class EffectiveLink {
 		public boolean plugged() { return count >= 2; }
 	}
 
+	/**
+	 * Whether a game of this system ({@code gba}, {@code gb}, {@code gbc}; null = gba) can use the link cable.
+	 * Game Boy and Game Boy Color games cannot yet (0.5.0); their players are left out of the link like players with
+	 * no game open, without affecting the others.
+	 */
+	public static boolean linkSupported(String system) {
+		return !PakData.isGameBoy(system);
+	}
+
 	/** Active members in room order, or empty if fewer than two are active. */
 	public static <K> List<K> active(List<K> room, Predicate<K> open) {
 		List<K> a = new ArrayList<>();

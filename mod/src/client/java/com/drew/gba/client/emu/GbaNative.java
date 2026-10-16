@@ -25,9 +25,14 @@ import static java.lang.foreign.ValueLayout.JAVA_LONG;
  * extracted from the mod jar at natives/&lt;os&gt;-&lt;arch&gt;/&lt;lib&gt;. All handles are looked up once.
  */
 public final class GbaNative {
+	/** GBA screen size; a Game Boy core reports its own size ({@link GbaCore#frameWidth()}), see {@link #GB_WIDTH}. */
 	public static final int WIDTH = 240, HEIGHT = 160, AUDIO_RATE = 32768, LINK_MSG_MAX = 64;
+	/** Game Boy / Game Boy Color screen (API 4). */
+	public static final int GB_WIDTH = 160, GB_HEIGHT = 144;
+	/** gba_platform() values. */
+	public static final int PLATFORM_GBA = 0, PLATFORM_GB = 1;
 	public static final int RUN_FRAME_DONE = 0, RUN_LINK_WAIT = 1, RUN_ERROR = -1;
-	public static final int API_VERSION = 3, MIN_API_VERSION = 1, RTC_WALL = 0, RTC_VIRTUAL = 1;
+	public static final int API_VERSION = 4, MIN_API_VERSION = 1, RTC_WALL = 0, RTC_VIRTUAL = 1;
 
 	private static GbaNative instance;
 	private static String loadError;
@@ -39,6 +44,8 @@ public final class GbaNative {
 	final MethodHandle setRtc;
 	/** gba_group_* (API 3); null for older libraries. */
 	final MethodHandle groupCreate, groupAdd, groupRunFrame, groupDestroy;
+	/** gba_platform / gba_frame_width / gba_frame_height (API 4, Game Boy support); null for older libraries. */
+	final MethodHandle platform, frameWidth, frameHeight;
 	final int version;
 
 	private GbaNative(SymbolLookup lib, int version) {
@@ -68,8 +75,17 @@ public final class GbaNative {
 		groupAdd = version >= 3 ? h(l, lib, "gba_group_add", FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS)) : null;
 		groupRunFrame = version >= 3 ? h(l, lib, "gba_group_run_frame", FunctionDescriptor.of(JAVA_INT, ADDRESS)) : null;
 		groupDestroy = version >= 3 ? h(l, lib, "gba_group_destroy", FunctionDescriptor.ofVoid(ADDRESS)) : null;
+		platform = version >= 4 ? h(l, lib, "gba_platform", FunctionDescriptor.of(JAVA_INT, ADDRESS)) : null;
+		frameWidth = version >= 4 ? h(l, lib, "gba_frame_width", FunctionDescriptor.of(JAVA_INT, ADDRESS)) : null;
+		frameHeight = version >= 4 ? h(l, lib, "gba_frame_height", FunctionDescriptor.of(JAVA_INT, ADDRESS)) : null;
 		setRtc = version >= 2 ? h(l, lib, "gba_set_rtc", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG, JAVA_INT)) : null;
 	}
+
+	/** True if the library can run Game Boy and Game Boy Color games (API 4). An older library loads GBA ROMs only. */
+	public boolean supportsGameBoy() { return platform != null; }
+
+	/** The library's API version. */
+	public int apiVersion() { return version; }
 
 	/** True if the library has the virtual RTC and lockstep groups (API 3), which input-sync netplay needs. */
 	public boolean supportsNetplay() { return setRtc != null && groupCreate != null; }

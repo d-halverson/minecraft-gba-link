@@ -22,14 +22,20 @@ public final class SavePickerScreen extends Screen {
 
 	private final Screen parent;
 	private final BiConsumer<String, byte[]> onPick;
+	private final String system; // "gba", "gb" or "gbc": which save sizes are valid
 	private List<Entry> entries = List.of();
 	private int page;
 	private int perPage = 6;
 	private String error = "";
 
 	public SavePickerScreen(Screen parent, BiConsumer<String, byte[]> onPick) {
+		this(parent, "gba", onPick);
+	}
+
+	public SavePickerScreen(Screen parent, String system, BiConsumer<String, byte[]> onPick) {
 		super(Component.literal("Import a save file"));
 		this.parent = parent;
+		this.system = system;
 		this.onPick = onPick;
 	}
 
@@ -43,7 +49,7 @@ public final class SavePickerScreen extends Screen {
 				.forEach(p -> {
 					try {
 						long size = Files.size(p);
-						list.add(new Entry(p, size, SaveRules.validateImportSize(size)));
+						list.add(new Entry(p, size, SaveRules.validateImportSize(size, system)));
 					} catch (IOException ignored) {
 					}
 				});
@@ -65,7 +71,7 @@ public final class SavePickerScreen extends Screen {
 			int idx = page * perPage + i;
 			if (idx >= entries.size()) break;
 			Entry e = entries.get(idx);
-			String label = e.path().getFileName() + "  (" + e.size() + " B)" + (e.problem() == null ? "" : "  - not a GBA save");
+			String label = e.path().getFileName() + "  (" + e.size() + " B)" + (e.problem() == null ? "" : "gba".equals(system) ? "  - not a GBA save" : "  - not a Game Boy save");
 			Button b = addRenderableWidget(Button.builder(Component.literal(label), bt -> pick(e)).bounds(x, y + i * 24, w, 20).build());
 			b.active = e.problem() == null;
 		}
@@ -83,7 +89,7 @@ public final class SavePickerScreen extends Screen {
 	private void pick(Entry e) {
 		try {
 			byte[] data = Files.readAllBytes(e.path());
-			String why = SaveRules.validateImportSize(data.length);
+			String why = SaveRules.validateImportSize(data.length, system);
 			if (why != null) {
 				error = why;
 				return;

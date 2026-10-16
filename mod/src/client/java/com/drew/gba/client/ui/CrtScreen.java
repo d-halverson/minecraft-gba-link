@@ -86,6 +86,7 @@ public final class CrtScreen extends Screen {
 		panelWidgets.add(controls.load(bx, y += BTN_H + BTN_GAP, bw, BTN_H));
 		panelWidgets.add(controls.export(bx, y += BTN_H + BTN_GAP, bw, BTN_H));
 		panelWidgets.add(controls.importSav(bx, y += BTN_H + BTN_GAP, bw, BTN_H));
+		panelWidgets.add(controls.controls(bx, y += BTN_H + BTN_GAP, bw, BTN_H));
 		builtLinked = ClientCable.linked();
 		if (builtLinked) panelWidgets.add(controls.unlink(bx, y += BTN_H + BTN_GAP, bw, BTN_H)); // only while cabled
 		panelWidgets.add(controls.leave("Leave (Esc)", bx, y += BTN_H + BTN_GAP, bw, BTN_H));
@@ -251,8 +252,9 @@ public final class CrtScreen extends Screen {
 		boolean hint = line.isEmpty();
 		int statsY = height - 23;
 		if (hint) { // two short lines: the full list does not fit a normal window in one
-			String l1 = "Arrows X Z A S Enter Backspace   Space: fast-forward   F5/F8: state";
-			String l2 = "Esc: leave   O: options   E: export .sav   I: import .sav   P: power off";
+			String l1 = hintKeys() + "   " + GbaKeys.keyName(com.drew.gba.client.ControlMap.Action.TURBO) + ": fast-forward   "
+				+ GbaKeys.keyName(com.drew.gba.client.ControlMap.Action.SAVE_STATE) + "/" + GbaKeys.keyName(com.drew.gba.client.ControlMap.Action.LOAD_STATE) + ": state";
+			String l2 = "Esc: leave   O: options   E: export .sav   I: import .sav   " + GbaKeys.keyName(com.drew.gba.client.ControlMap.Action.POWER) + ": power off";
 			g.text(font, l1, (width - font.width(l1)) / 2, height - 22, 0x99FFFFFF, true);
 			g.text(font, l2, (width - font.width(l2)) / 2, height - 12, 0x99FFFFFF, true);
 			statsY = height - 33;
@@ -265,10 +267,23 @@ public final class CrtScreen extends Screen {
 		super.extractRenderState(g, mouseX, mouseY, a); // the Options button and the panel's buttons
 		if (panelOpen) {
 			controls.drawPowerSwitch(g, font, switchCx, switchCy, mouseX, mouseY, false);
-			g.text(font, controls.overSwitch(mouseX, mouseY) ? "Power off (P)" : "Power (P)", switchCx + SessionControls.SW_W / 2 + 17, switchCy - 4,
+			g.text(font, controls.overSwitch(mouseX, mouseY) ? "Power off (" + GbaKeys.keyName(com.drew.gba.client.ControlMap.Action.POWER) + ")" : "Power (" + GbaKeys.keyName(com.drew.gba.client.ControlMap.Action.POWER) + ")", switchCx + SessionControls.SW_W / 2 + 17, switchCy - 4,
 				controls.overSwitch(mouseX, mouseY) ? 0xFFFFE08A : PANEL_TEXT, false);
 			controls.renderKnobs(g, font, mouseX, mouseY);
 		}
+	}
+
+	/** "Arrows X Z A S Enter Backspace" for the default map; otherwise D-pad, A, B, L, R, Start, Select as bound. */
+	private static String hintKeys() {
+		var cm = com.drew.gba.client.ControlMap.get();
+		if (cm.isDefault()) return "Arrows X Z A S Enter Backspace";
+		StringBuilder sb = new StringBuilder();
+		for (var a : new com.drew.gba.client.ControlMap.Action[] {com.drew.gba.client.ControlMap.Action.UP, com.drew.gba.client.ControlMap.Action.DOWN,
+			com.drew.gba.client.ControlMap.Action.LEFT, com.drew.gba.client.ControlMap.Action.RIGHT, com.drew.gba.client.ControlMap.Action.A, com.drew.gba.client.ControlMap.Action.B,
+			com.drew.gba.client.ControlMap.Action.L, com.drew.gba.client.ControlMap.Action.R, com.drew.gba.client.ControlMap.Action.START, com.drew.gba.client.ControlMap.Action.SELECT}) {
+			sb.append(sb.length() == 0 ? "" : " ").append(GbaKeys.keyName(a));
+		}
+		return sb.toString();
 	}
 
 	/** Semi-transparent dark panel with an indigo accent edge. */

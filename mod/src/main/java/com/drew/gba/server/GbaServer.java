@@ -49,6 +49,8 @@ public final class GbaServer {
 	private final Map<UUID, UUID> sessions = new HashMap<>();
 	/** Player -> ROM SHA-1 of the pak they have open (decides netplay vs classic link). */
 	private final Map<UUID, String> sessionSha1 = new HashMap<>();
+	/** Player -> system of the pak they have open ({@link PakData#SYS_GBA} etc.). Game Boy sessions are not linkable yet. */
+	private final Map<UUID, String> sessionSystem = new HashMap<>();
 	/** Netplay session each player is in (absent = classic link or none). */
 	private final Map<UUID, NpSession> np = new HashMap<>();
 	private long npCounter;
@@ -221,11 +223,16 @@ public final class GbaServer {
 				: "Your GBA Link mod is out of date - update the mod to play");
 			return;
 		}
+		if (inserted.gameBoy() && !canGameBoy(p.getUUID())) {
+			hint(p, "Your GBA Link mod can't play Game Boy games - update the mod to play");
+			return;
+		}
 		byte[] save = store().read(inserted.pakId());
 		sessions.put(p.getUUID(), inserted.pakId());
 		sessionSha1.put(p.getUUID(), inserted.sha1());
+		sessionSystem.put(p.getUUID(), inserted.system());
 		assemblers.remove(p.getUUID());
-		LOG.info("link: {} opened session for \"{}\" (pak {})", p.getName().getString(), inserted.title(), inserted.pakId());
+		LOG.info("link: {} opened session for \"{}\" (pak {}, {})", p.getName().getString(), inserted.title(), inserted.pakId(), inserted.system());
 		ServerPlayNetworking.send(p, new Payloads.Open(inserted.pakId(), inserted.sha1(), inserted.title(), save, SaveRules.revision(save)));
 		refreshLink(p.getUUID()); // after Open so the client's session exists when link_state arrives
 	}
@@ -235,6 +242,7 @@ public final class GbaServer {
 		if (sessions.containsKey(p.getUUID())) LOG.info("link: {} closed session (pak {})", p.getName().getString(), sessions.get(p.getUUID()));
 		sessions.remove(p.getUUID());
 		sessionSha1.remove(p.getUUID());
+		sessionSystem.remove(p.getUUID());
 		assemblers.remove(p.getUUID());
 		refreshLink(p.getUUID());
 	}
@@ -251,11 +259,12 @@ public final class GbaServer {
 		if (hand == null) { hint(p, "Hold a Blank Game Pak to burn a game"); return; }
 		String title = PakData.sanitizeTitle(b.title());
 		if (title.isEmpty()) title = "Unknown game";
+		String system = PakData.normalizeSystem(b.system());
 		UUID id = new UUID(ThreadLocalRandom.current().nextLong(), ThreadLocalRandom.current().nextLong());
-		PakData pak = new PakData(id, sha1, title, PakData.sanitizeCode(b.gameCode()));
+		PakData pak = new PakData(id, sha1, title, PakData.sanitizeCode(b.gameCode()), system);
 		p.setItemInHand(hand, GbaItems.createPak(pak));
 		hint(p, "Burned " + title + " onto a Game Pak");
-		LOG.info("{} burned pak {} ({}, {})", p.getName().getString(), id, title, sha1);
+		LOG.info("{} burned pak {} ({}, {}, {})", p.getName().getString(), id, title, sha1, system);
 	}
 
 	// ------------------------------------------------------------------ saves
@@ -269,10 +278,11 @@ public final class GbaServer {
 	}
 
 	/** Marks {@code pakId} as the pak this player has open (so its save uploads are accepted). */
-	void openSession(ServerPlayer p, UUID pakId, String sha1) {
-		LOG.info("link: {} opened session at a CRT (pak {})", p.getName().getString(), pakId);
+	void openSession(ServerPlayer p, UUID pakId, String sha1, String system) {
+		LOG.info("link: {} opened session at a CRT (pak {}, {})", p.getName().getString(), pakId, system);
 		sessions.put(p.getUUID(), pakId);
 		sessionSha1.put(p.getUUID(), sha1);
+		sessionSystem.put(p.getUUID(), PakData.normalizeSystem(system));
 		assemblers.remove(p.getUUID());
 	}
 
@@ -349,7 +359,7 @@ public final class GbaServer {
 		}
 		if (done == null) return;
 		importAssemblers.remove(me);
-		String why = SaveRules.importRejection(true, done.length);
+		String why = SaveRules.importRejection(true, done.length, sessionSystem.get(me));
 		if (why != null) {
 			hint(p, "Import refused: " + why);
 			ack(p, c.pakId(), store().revision(c.pakId()), false, why);
@@ -432,12 +442,28 @@ public final class GbaServer {
 			// cabled but not running a GBA: tell them how to join
 			for (UUID id : u.room()) {
 				if (!sessions.containsKey(id)) hintId(id, "Cable linked - open your GBA to join the link");
+					else if (!linkable(id)) hintId(id, "Link cable for Game Boy games isn't supported yet");
 			}
 		}
 	}
 
 	private boolean hasSession(UUID id) {
 		return sessions.containsKey(id);
+	}
+
+	/**
+	 * Takes part in the link: has a session open AND plays a game the link supports. Game Boy and Game Boy Color
+	 * games have no link cable yet (0.5.0), so such a player counts as "not open": the effective link, the relay routes
+	 * and netplay leave them out, and everybody else keeps linking among themselves. Always use this, not
+	 * {@link #hasSession}, for link decisions.
+	 */
+	private boolean linkable(UUID id) {
+		return hasSession(id) && EffectiveLink.linkSupported(sessionSystem.get(id));
+	}
+
+	static boolean canGameBoy(UUID id) {
+		Integer caps = clientCaps.get(id);
+		return caps != null && (caps & Payloads.Hello.CAP_GAMEBOY) != 0;
 	}
 
 	/** Recompute and resend the effective link for the room {@code id} is in. */
@@ -453,9 +479,9 @@ public final class GbaServer {
 	}
 
 	private void sendRoom(List<UUID> room) {
-		List<UUID> activeMembers = EffectiveLink.active(room, this::hasSession);
+		List<UUID> activeMembers = EffectiveLink.active(room, this::linkable);
 		boolean netplay = EffectiveLink.netplay(activeMembers, sessionSha1::get, this::canNetplay);
-		Map<UUID, EffectiveLink.State> states = EffectiveLink.states(room, this::hasSession, netplay);
+		Map<UUID, EffectiveLink.State> states = EffectiveLink.states(room, this::linkable, netplay);
 		List<String> names = new ArrayList<>();
 		for (UUID id : activeMembers) names.add(nameOf(id));
 		boolean changed = false;
@@ -555,7 +581,7 @@ public final class GbaServer {
 		}
 		List<String> names = new ArrayList<>();
 		List<Boolean> open = new ArrayList<>();
-		for (UUID m : room) { names.add(nameOf(m)); open.add(hasSession(m)); }
+		for (UUID m : room) { names.add(nameOf(m)); open.add(linkable(m)); }
 		ServerPlayNetworking.send(sp, new Payloads.CableState(room.indexOf(id), names, open));
 	}
 
@@ -598,7 +624,7 @@ public final class GbaServer {
 	private void rebuildRoutes() {
 		Map<UUID, Route> m = new HashMap<>();
 		for (List<UUID> room : rooms.allRooms()) {
-			List<UUID> active = EffectiveLink.active(room, this::hasSession);
+			List<UUID> active = EffectiveLink.active(room, this::linkable);
 			for (int i = 0; i < active.size(); i++) {
 				List<ServerGamePacketListenerImpl> to = new ArrayList<>();
 				for (int j = 0; j < active.size(); j++) {
@@ -677,6 +703,7 @@ public final class GbaServer {
 		if (sessions.containsKey(id)) LOG.info("link: {} disconnected with a session open (pak {})", p.getName().getString(), sessions.get(id));
 		sessions.remove(id); // unlink() below republishes the room (and routes) without this player
 		sessionSha1.remove(id);
+		sessionSystem.remove(id);
 		np.remove(id);
 		snapshotLimit.remove(id);
 		clientCaps.remove(id);

@@ -1,5 +1,5 @@
-/* gbacore.h - C ABI of the GBA emulator shim (mGBA 0.10.5 + serial-level link cable).
- * Contract: gba/SPEC.md. API version 3. */
+/* gbacore.h - C ABI of the GBA / Game Boy / Game Boy Color emulator shim (mGBA 0.10.5 + serial-level GBA link cable).
+ * Contract: gba/SPEC.md. API version 4. */
 #ifndef GBACORE_H
 #define GBACORE_H
 
@@ -28,6 +28,10 @@ typedef struct gba_core gba_core;
 
 #define GBA_WIDTH  240
 #define GBA_HEIGHT 160
+#define GB_WIDTH   160         /* Game Boy / Game Boy Color screen (API version 4) */
+#define GB_HEIGHT  144
+#define GBA_PLATFORM_GBA 0     /* gba_platform() */
+#define GBA_PLATFORM_GB  1     /* Game Boy and Game Boy Color */
 #define GBA_AUDIO_RATE 32768   /* output sample rate, stereo int16 interleaved */
 #define GBA_LINK_MSG_MAX 64    /* max bytes of one opaque link message */
 
@@ -38,29 +42,44 @@ typedef struct gba_core gba_core;
                                   to continue the SAME frame */
 #define GBA_RUN_ERROR     -1
 
-GBA_API uint32_t    gba_api_version(void);              /* returns 3 for this spec (2 = no groups, 1 = no gba_set_rtc) */
+GBA_API uint32_t    gba_api_version(void);              /* returns 4 for this spec (3 = GBA only, 2 = no groups, 1 = no gba_set_rtc) */
 GBA_API gba_core*   gba_create(void);
 GBA_API void        gba_destroy(gba_core*);
 
+/* Loads a GBA, Game Boy or Game Boy Color ROM. The system is detected from the ROM contents (mGBA's header checks:
+   the Game Boy cartridge logo at 0x104), never from the file name; anything that is not a Game Boy ROM loads as GBA.
+   Game Boy ROMs larger than 8 MiB and GBA ROMs larger than 32 MiB fail (-2). Loading a ROM may replace the emulation
+   core (and dissolves a lockstep group the core was in); a pending virtual RTC is cleared (call gba_set_rtc again). */
 GBA_API int         gba_load_rom(gba_core*, const char* utf8_path);   /* 0 ok, <0 error */
 GBA_API void        gba_reset(gba_core*);
-/* Fill buf with the ROM's internal title (12 chars) + game code (4 chars) NUL-terminated. */
+/* Fill buf with the ROM's internal title (up to 12 chars) + game code (4 chars) NUL-terminated.
+   GBA: header title and game code. Game Boy / Color: the title is up to 11 printable characters at 0x134; the code is
+   the manufacturer code at 0x13F..0x142 when those are 4 upper-case letters/digits, else 'G' + 3 hex digits (the
+   header checksum byte 0x14D and the low nibble of the global checksum byte 0x14F). */
 GBA_API int         gba_rom_info(gba_core*, char* title_out /*>=13*/, char* code_out /*>=5*/);
 
+/* ---- Platform (API version 4) ---- */
+GBA_API int         gba_platform(gba_core*);            /* GBA_PLATFORM_GBA (0) or GBA_PLATFORM_GB (1: Game Boy and Color) */
+GBA_API int         gba_frame_width(gba_core*);         /* 240 (GBA) or 160 (Game Boy), also before a ROM is loaded: 240 */
+GBA_API int         gba_frame_height(gba_core*);        /* 160 (GBA) or 144 (Game Boy) */
+
 /* Keys: GBA KEYINPUT bit order, 1 = pressed.
-   A=0 B=1 Select=2 Start=3 Right=4 Left=5 Up=6 Down=7 R=8 L=9 */
+   A=0 B=1 Select=2 Start=3 Right=4 Left=5 Up=6 Down=7 R=8 L=9
+   Game Boy / Color use bits 0-7 for A, B, Select, Start and the D-pad; R and L are ignored. */
 GBA_API void        gba_set_keys(gba_core*, uint32_t keymask);
 
 GBA_API int         gba_run_frame(gba_core*);           /* returns GBA_RUN_* */
 
-/* 240*160 pixels, row-major, each pixel 4 bytes in memory order R,G,B,A (A=255).
-   Valid until the next gba_run_frame. */
+/* gba_frame_width() x gba_frame_height() pixels (240x160 GBA, 160x144 Game Boy), row-major, each pixel 4 bytes in
+   memory order R,G,B,A (A=255). Valid until the next gba_run_frame. */
 GBA_API const uint8_t* gba_framebuffer(gba_core*);
 
 /* Drain up to max_frames stereo frames (2 int16 each) produced so far. Returns frames written. */
 GBA_API size_t      gba_read_audio(gba_core*, int16_t* out, size_t max_frames);
 
-/* Battery save (SRAM/Flash/EEPROM, plus RTC if present), in mGBA's .sav format. */
+/* Battery save (SRAM/Flash/EEPROM, plus RTC if present), in mGBA's .sav format.
+   Game Boy: the cartridge RAM followed by the 48 byte VBA-compatible RTC footer for MBC3+RTC carts (Pokemon Gold/Silver/
+   Crystal). Unlike GBA the size is known right after gba_load_rom (0 for carts without battery RAM). */
 GBA_API size_t      gba_save_size(gba_core*);           /* bytes currently in use, 0 = none */
 GBA_API size_t      gba_get_save(gba_core*, uint8_t* out, size_t cap);   /* returns bytes written */
 GBA_API int         gba_load_save(gba_core*, const uint8_t* data, size_t len); /* after load_rom, before first run; 0 ok */
@@ -71,7 +90,9 @@ GBA_API size_t      gba_state_size(gba_core*);
 GBA_API size_t      gba_save_state(gba_core*, uint8_t* out, size_t cap);
 GBA_API int         gba_load_state(gba_core*, const uint8_t* data, size_t len);
 
-/* ---- Link cable ----
+/* ---- Link cable (GBA only) ----
+   A Game Boy core has no link support yet (API 4): gba_link_configure is ignored, gba_link_poll_outgoing returns 0,
+   gba_link_deliver is ignored and gba_group_add fails (-1). Check gba_platform() first.
    Messages are OPAQUE to Java and the server: Java only forwards bytes between cores.
    player_index: 0 = parent/master, 1..3 = children. player_count < 2 = cable unplugged.
    Changing configuration while GBA_RUN_LINK_WAIT is pending must unblock the core
@@ -108,7 +129,7 @@ GBA_API int         gba_set_rtc(gba_core*, int64_t epoch_seconds, int mode);
    their classic link driver back (idle). */
 typedef struct gba_group gba_group;
 GBA_API gba_group*  gba_group_create(int players);
-GBA_API int         gba_group_add(gba_group*, gba_core*);          /* 0 ok */
+GBA_API int         gba_group_add(gba_group*, gba_core*);          /* 0 ok, <0 error (also for a Game Boy core) */
 GBA_API int         gba_group_run_frame(gba_group*);                /* GBA_RUN_FRAME_DONE or GBA_RUN_ERROR */
 GBA_API void        gba_group_destroy(gba_group*);
 /* Diagnostics: how often the scheduler found every core asleep and had to wake them (expected 0). */

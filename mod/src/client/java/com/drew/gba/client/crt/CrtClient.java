@@ -310,7 +310,7 @@ public final class CrtClient {
 					int seq = s.frames.seq();
 					if (seq != t.lastOwnSeq && seq > 0) {
 						t.lastOwnSeq = seq;
-						s.frames.copyTo(t.rgba);
+						s.frames.copyLetterboxed(t.rgba); // a Game Boy picture sits centred in the 240x160 canvas, like the spectators see it
 						t.dirty = true;
 						t.hasFrame = true;
 					}

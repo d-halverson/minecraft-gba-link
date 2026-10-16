@@ -1,8 +1,8 @@
-# gbacore - native GBA emulator library
+# gbacore - native GBA / Game Boy / Game Boy Color emulator library
 
-`libgbacore` wraps **mGBA 0.10.5** (GBA core only, built statically into the library) behind the
-C ABI in `include/gbacore.h` (contract: `../SPEC.md`, API version 3) and adds a serial-level
-**link cable** that works across processes: the host only forwards opaque byte messages.
+`libgbacore` wraps **mGBA 0.10.5** (the GBA and the Game Boy / Game Boy Color cores, built statically into the library)
+behind the C ABI in `include/gbacore.h` (contract: `../SPEC.md`, API version 4) and adds a serial-level
+**GBA link cable** that works across processes: the host only forwards opaque byte messages.
 
 ## Build
 
@@ -43,9 +43,12 @@ Third-party sources (not modified): `third_party/mgba` (tag 0.10.5, git submodul
   `src/exports.map`, on macOS from `src/exports.macos.txt`. mGBA is built with
   `-fvisibility=hidden`, so only `gba_*` symbols are exported (checked by the `exports` test).
 
-### What is disabled in mGBA
+### What is enabled / disabled in mGBA
 
-GB/GBC core, Qt/SDL frontends, OpenGL, debuggers + GDB stub, editline, ffmpeg, libzip/minizip,
+Enabled: the GBA core and (since 0.5.0) the GB/GBC core (`M_CORE_GB`, about 170 KB more per library, no new dependencies).
+Disabled:
+
+Qt/SDL frontends, OpenGL, debuggers + GDB stub, editline, ffmpeg, libzip/minizip,
 zlib/png (no compressed ROMs/states, no screenshots), sqlite, lua/scripting, ELF loader, LZMA/7z,
 Discord RPC (`DISABLE_DEPS`, `LIBMGBA_ONLY` via `add_subdirectory(... EXCLUDE_FROM_ALL)`). No BIOS
 file is used: mGBA's built-in HLE BIOS runs. The only extra flag is `-fwrapv`: mGBA computes ARM/Thumb
@@ -54,7 +57,8 @@ test 102 without it).
 
 ## Behaviour notes
 
-* Video: 240x160, bytes in memory R,G,B,A (A forced to 255). Valid until the next `gba_run_frame`.
+* Video: 240x160 (GBA) or 160x144 (Game Boy), see `gba_frame_width/height`; bytes in memory R,G,B,A (A forced to 255). Valid until the
+  next `gba_run_frame`.
 * Audio: 32768 Hz stereo int16. mGBA delivers 4-sample blocks, so single frames carry 548 or 552
   sample frames (steady-state average 548.6). Unread audio is kept in a 16384-frame ring (oldest
   dropped on overflow). Link waits do not lose audio.
@@ -67,6 +71,35 @@ test 102 without it).
 * States: raw `mCore::saveState` blob (no compression, no screenshot), size from `gba_state_size`.
   In-flight link transfers are not part of a state: loading a state or resetting aborts them.
 * Logging from mGBA is discarded.
+
+## Game Boy and Game Boy Color (API version 4)
+
+`gba_load_rom` reads the whole file, asks mGBA's own header check (`mCoreIsCompatible`: the Game Boy logo at 0x104) and builds the matching
+core: GBA ROMs and anything unrecognised load as GBA exactly as before; Game Boy ROMs (up to 8 MiB) get a **fresh GB core per load**
+(mGBA keeps the detected hardware model across loads). `gba_platform` is 0 for GBA, 1 for GB/GBC; `gba_frame_width/height` give the
+picture size (160x144); the framebuffer format is the same RGBA bytes.
+
+* **Model and options.** No BIOS (`skipBios`, `useBios = false`). The model is mGBA's autodetect: CGB flag -> Game Boy Color, else
+  DMG. Super Game Boy borders are off (`sgb.borders` false) and `sgb.model = DMG` makes SGB-flagged games plain DMG, so the picture is
+  always 160x144. DMG games get a green palette (`0xE0F8D0, 0x88C070, 0x346856, 0x081820`, set through `GBVideoSetPalette` for BG, OBJ0 and OBJ1
+  and re-applied after every reset); Game Boy Color games use mGBA's colours unchanged (no colour correction).
+* **Keys.** The GBA key mask maps to the Game Boy buttons: bits 0-7 are A, B, Select, Start, Right, Left, Up, Down (the same order on both
+  systems), L / R (bits 8, 9) are dropped. mGBA does not allow Left+Right or Up+Down together (default `allowOpposingDirections`).
+* **Audio** goes through the same blip resampler to 32768 Hz stereo; a frame is 70224 cycles at 4194304 Hz (59.7275 fps), about 548.7 stereo frames.
+* **Saves.** The save lives in a memory file like on GBA. `gba_save_size` = cartridge RAM size (known after load) plus the clock footer for
+  MBC3+RTC (48 bytes), HuC3 or TAMA5 carts; `gba_get_save` writes the footer first (`GBMBCRTCWrite`) so the clock is current. The
+  RTC footer follows VBA / mGBA: five current and five latched registers and the UNIX time of the last latch; mGBA restores the clock registers from the
+  latched copy. Carts without battery RAM have size 0.
+* **RTC.** `gba_set_rtc` works for MBC3 carts (mGBA's generic RTC source; both modes). Because the cartridge records the time of the last latch
+  when the ROM is loaded, switching the source moves that time by the same amount, so the in-game clock does not jump; a save loaded afterwards
+  restores its own value. A Game Boy clock is UNIX based (no time zone conversion); virtual mode still forces `TZ=UTC` for the process like on GBA.
+* **States** are raw mGBA states, `gba_state_size` has no group trailer (a state with a 128 byte trailer is rejected for a Game Boy core).
+* **GBA-only APIs.** `gba_link_configure` / `gba_link_deliver` are ignored, `gba_link_poll_outgoing` returns 0 and `gba_group_add` fails with -1 for a
+  Game Boy core; the lockstep and link code never runs for them. Loading a ROM into a core that is a member of a group dissolves the group first.
+* Tests: `gb` (boot, frames, framebuffer shades / colours, audio rate and tone, keys, save + RTC footer round trips, state round trip and replay, reset,
+  virtual RTC, platform switching, refusal of link / group calls), `determinism_gb`, and the manual harness `gb_harness` (screenshots of any ROM). The
+  ROMs are written by `tests/make_gb_rom.py` (hand assembled LR35902: tile graphics, text, a 440 Hz tone, MBC3+RTC / MBC5 battery RAM,
+  joypad reads); `gb_rom_in_sync_*` checks that the copies the Java tests use (`mod/src/test/resources/roms`) are what the generator writes.
 
 ## Virtual RTC (API version 2)
 
@@ -186,6 +219,7 @@ configure) and feed the "all ready" bit.
 * `emerald_harness` (not in ctest): boots two cores from a ROM and saves in `gba/test-roms/`, scripts input, writes PNG screenshots.
 * `determinism`: two cores in a lockstep group (what netplay uses), fixed inputs, virtual RTC;
   pins the CRC32 of both complete states at frames 100/1000/1500 (the same values the Java check prints on every CI platform).
+* `gb`, `determinism_gb`, `gb_rom_in_sync_*`: Game Boy / Game Boy Color, see above. `gb_harness` is a manual tool for real cartridge dumps.
 * `dylib`: `dlopen`s the real shared library, checks that only `gba_*` is visible and runs a ROM.
 * `exports`: `nm` check.
 

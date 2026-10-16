@@ -14,7 +14,12 @@ import net.minecraft.resources.Identifier;
 
 import java.util.List;
 
-/** The Game Boy Advance: purple bezel around a 240x160 live texture. Esc suspends; the power switch powers off. */
+/**
+ * The Game Boy Advance: purple bezel around the live picture. Esc suspends; the power switch powers off.
+ * A GBA game fills the screen well (240x160, 3:2). A Game Boy / Game Boy Color game (160x144, 10:9) is drawn at its own
+ * aspect ratio, as large as fits the well with whole-number scaling where possible, centred, with the dark well around
+ * it; a "GB" / "GBC" tag sits next to the title and the L / R shoulder buttons (which those games do not have) are hidden.
+ */
 public final class GbaScreen extends Screen {
 	private static final Identifier TEX = Identifier.fromNamespaceAndPath("gbalink", "dynamic/screen");
 	private static final int W = GbaNative.WIDTH, H = GbaNative.HEIGHT;
@@ -27,6 +32,7 @@ public final class GbaScreen extends Screen {
 	private boolean builtLinked;
 	private final SessionControls controls; // buttons, power switch and volume wheels (shared with the CRT options panel)
 	private DynamicTexture texture;
+	private int texW, texH;
 	private int lastSeq = -1;
 	private final byte[] frameCopy = new byte[W * H * 4];
 	private boolean closed;
@@ -71,21 +77,18 @@ public final class GbaScreen extends Screen {
 				.bounds(width / 2 - 40, height / 2 + 30, 80, 20).build());
 			return;
 		}
-		if (texture == null) {
-			texture = new DynamicTexture("gbalink screen", W, H, true);
-			minecraft.getTextureManager().register(TEX, texture);
-		}
 		int by = height - 24;
 		int cx = width / 2;
 		builtLinked = com.drew.gba.client.ClientCable.linked();
-		int n = builtLinked ? 6 : 5; // an Unlink button joins the row while cabled
+		int n = builtLinked ? 7 : 6; // an Unlink button joins the row while cabled
 		int bw = Math.min(92, (width - 20 - (n - 1) * 4) / n), gap = 4;
 		int x0 = cx - (n * bw + (n - 1) * gap) / 2;
 		addRenderableWidget(controls.save(x0, by, bw, 18));
 		addRenderableWidget(controls.load(x0 + (bw + gap), by, bw, 18));
 		addRenderableWidget(controls.export(x0 + 2 * (bw + gap), by, bw, 18));
 		addRenderableWidget(controls.importSav(x0 + 3 * (bw + gap), by, bw, 18));
-		if (builtLinked) addRenderableWidget(controls.unlink(x0 + 4 * (bw + gap), by, bw, 18));
+		addRenderableWidget(controls.controls(x0 + 4 * (bw + gap), by, bw, 18));
+		if (builtLinked) addRenderableWidget(controls.unlink(x0 + 5 * (bw + gap), by, bw, 18));
 		addRenderableWidget(controls.leave("Close (Esc)", x0 + (n - 1) * (bw + gap), by, bw, 18));
 	}
 
@@ -170,7 +173,7 @@ public final class GbaScreen extends Screen {
 		int padSide = wellPad + wing, padTop = 26, padBottom = 34;
 		int footerTop = height - 24 - 24; // body plus the status and stats lines below it must end above the buttons
 		int availW = width - 2 * padSide - 8, availH = footerTop - padBottom - padTop - 2;
-		int dw, dh;
+		int dw, dh; // the screen well: the size of a GBA picture
 		int sInt = Math.min(availW / W, availH / H);
 		if (sInt >= 1) {
 			dw = W * sInt;
@@ -190,26 +193,62 @@ public final class GbaScreen extends Screen {
 		g.fill(bodyL + 2, bodyB - 4, bodyR - 2, bodyB - 2, 0xFF352A70);
 		// screen well
 		g.fill(wellL, sy - wellPad, wellR, sy + dh + wellPad, 0xFF1A1830);
-		g.fill(sx - 3, sy - 3, sx + dw + 3, sy + dh + 3, 0xFF000000);
+		// where the picture goes: the whole well for a GBA game; a centred 10:9 rectangle for a Game Boy game
+		boolean gb = session.isGameBoy();
+		int px = sx, py = sy, pw = dw, ph = dh;
+		if (gb) {
+			int gs = Math.min(dw / GbaNative.GB_WIDTH, dh / GbaNative.GB_HEIGHT);
+			if (gs >= 1) {
+				pw = GbaNative.GB_WIDTH * gs;
+				ph = GbaNative.GB_HEIGHT * gs;
+			} else {
+				pw = Math.max(10, Math.min(dw, dh * 10 / 9) / 10 * 10);
+				ph = pw * 9 / 10;
+			}
+			px = sx + (dw - pw) / 2;
+			py = sy + (dh - ph) / 2;
+		}
+		g.fill(px - 3, py - 3, px + pw + 3, py + ph + 3, 0xFF000000);
 		int swCx = bodyL + 8 + 44 + 10 + SessionControls.SW_W / 2, swCy = bodyT + 6;
 		boolean room = width / 2 - swCx - SessionControls.SW_W / 2 - 14 >= font.width("GAME BOY ADVANCE") / 2;
 		if (room) g.centeredText(font, "GAME BOY ADVANCE", width / 2, bodyT + 6, 0xFFD8CCFF);
+		if (gb) { // which kind of cartridge is in: "GB" or "GBC"
+			String tag = "gbc".equals(session.system()) ? "GBC" : "GB";
+			int tw = font.width(tag);
+			int tx = room ? width / 2 + font.width("GAME BOY ADVANCE") / 2 + 8 : width / 2 - tw / 2 - 3;
+			int ty = bodyT + 4;
+			g.fill(tx - 3, ty - 1, tx + tw + 3, ty + 10, 0xFF1E1840);
+			g.fill(tx - 2, ty, tx + tw + 2, ty + 9, 0xFF7A68D8);
+			g.text(font, tag, tx, ty + 1, 0xFFFFFFFF, false);
+		}
 		if (!room && width / 2 - swCx < SessionControls.SW_W / 2 + 14) controls.hideSwitch(); // no space for the switch at all
-		else controls.drawPowerSwitch(g, font, swCx, swCy, mouseX, mouseY, room || font.width("POWER OFF (P)") / 2 < width / 2 - swCx);
+		else controls.drawPowerSwitch(g, font, swCx, swCy, mouseX, mouseY, room || font.width(controls.powerLabel()) / 2 < width / 2 - swCx);
 
 		// the live frame
-		if (texture != null && !session.isFinished()) {
+		if (!session.isFinished()) {
 			int seq = session.frames.seq();
 			if (seq != lastSeq && seq > 0) {
 				lastSeq = seq;
-				session.frames.copyTo(frameCopy);
+				int fw, fh;
+				synchronized (session.frames) { // width, height and pixels of one frame together
+					fw = session.frames.width();
+					fh = session.frames.height();
+					session.frames.copyTo(frameCopy);
+				}
+				if (texture == null || fw != texW || fh != texH) { // first frame, or the game's picture size changed
+					if (texture != null) minecraft.getTextureManager().release(TEX);
+					texture = new DynamicTexture("gbalink screen", fw, fh, true);
+					texW = fw;
+					texH = fh;
+					minecraft.getTextureManager().register(TEX, texture);
+				}
 				NativeImage img = texture.getPixels();
-				img.getPixelBytes().put(0, frameCopy, 0, frameCopy.length);
+				img.getPixelBytes().put(0, frameCopy, 0, fw * fh * 4);
 				texture.upload();
 			}
 		}
 		if (texture != null && lastSeq > 0) {
-			g.blit(TEX, sx, sy, sx + dw, sy + dh, 0f, 1f, 0f, 1f);
+			g.blit(TEX, px, py, px + pw, py + ph, 0f, 1f, 0f, 1f);
 		}
 
 		drawControls(g, mouseX, mouseY, bodyL, bodyR, wellL, wellR, bodyT, sy, dh);
@@ -263,8 +302,10 @@ public final class GbaScreen extends Screen {
 		g.text(font, "START", mid + 24 - font.width("START") / 2, ly + 7, LABEL, false);
 		// shoulder buttons along the top corners of the body
 		int shY = bodyT + 6;
-		GuiSprites.sprite(g, (held & (1 << L)) != 0 ? "shoulder_pressed" : "shoulder", bodyL + 8 + 22, shY, 44, 10);
-		GuiSprites.sprite(g, (held & (1 << R)) != 0 ? "shoulder_pressed" : "shoulder", bodyR - 8 - 22, shY, 44, 10);
+		if (!session.isGameBoy()) { // Game Boy games have no shoulder buttons
+			GuiSprites.sprite(g, (held & (1 << L)) != 0 ? "shoulder_pressed" : "shoulder", bodyL + 8 + 22, shY, 44, 10);
+			GuiSprites.sprite(g, (held & (1 << R)) != 0 ? "shoulder_pressed" : "shoulder", bodyR - 8 - 22, shY, 44, 10);
+		}
 		// volume wheels along the bottom edge, in the wing columns under the D-pad (GBA) and the A/B buttons (Minecraft)
 		int kTop = sy + dh + 7;
 		controls.gba.layout(dx, kTop);

@@ -1,5 +1,6 @@
 package com.drew.gba.client;
 
+import com.drew.gba.rom.RomHeader;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.reflect.TypeToken;
@@ -17,13 +18,39 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.stream.Stream;
 
-/** ROMs the player has put in {@code <gameDir>/gbalink/roms/}, with SHA-1 and header info cached. */
+/** ROMs the player has put in {@code <gameDir>/gbalink/roms/} (.gba, .gb, .gbc), with SHA-1 and header info cached. */
 public final class RomLibrary {
-	public record Rom(String file, long size, long mtime, String sha1, String name, String title, String code) {
+	/**
+	 * {@code system} (0.5.0; entries cached by older versions have none and are GBA): {@link RomHeader#GBA},
+	 * {@link RomHeader#GB} or {@link RomHeader#GBC}. {@code title} / {@code code} come from the header (see {@link RomHeader}).
+	 */
+	public record Rom(String file, long size, long mtime, String sha1, String name, String title, String code, String system, String warning) {
+		public Rom {
+			if (system == null || system.isEmpty()) system = RomHeader.GBA;
+			if (warning == null) warning = "";
+		}
+
+		public Rom(String file, long size, long mtime, String sha1, String name, String title, String code, String system) {
+			this(file, size, mtime, sha1, name, title, code, system, "");
+		}
+
 		public Path path() {
 			return romsDir().resolve(file);
 		}
+
+		public boolean gameBoy() { return !RomHeader.GBA.equals(system); }
+
+		/** {@code GBA}, {@code GB} or {@code GBC}. */
+		public String tag() { return RomHeader.tag(system); }
 	}
+
+	/** A file in the ROM folder that was skipped, and why (shown in the burn list). */
+	public record Rejected(String file, String reason) {}
+
+	private static volatile List<Rejected> rejected = List.of();
+
+	/** Files the last {@link #scan()} skipped because they are not valid ROMs (bad header, too large, ...). */
+	public static List<Rejected> lastRejected() { return rejected; }
 
 	private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 	private static Path gameDir;
@@ -51,7 +78,8 @@ public final class RomLibrary {
 	private static final String ROMS_README = String.join(System.lineSeparator(),
 		"GBA Link - ROMs folder",
 		"",
-		"Put your own .gba game files here (subfolders one level deep are scanned too).",
+		"Put your own game files here: .gba (Game Boy Advance), .gb and .gbc (Game Boy / Game Boy Color).",
+		"Subfolders one level deep are scanned too.",
 		"Then hold a Blank Game Pak in Minecraft and press G (or right-click) to burn one onto it.",
 		"",
 		"Games are matched by the SHA-1 of the file, so everyone playing the same Game Pak needs the",
@@ -102,20 +130,23 @@ public final class RomLibrary {
 		List<Path> files = new ArrayList<>();
 		try (Stream<Path> s = Files.walk(romsDir(), 2)) {
 			s.filter(Files::isRegularFile)
-				.filter(p -> p.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".gba"))
+				.filter(p -> RomHeader.systemForFileName(p.getFileName().toString()) != null)
 				.forEach(files::add);
 		} catch (IOException e) {
 			return out;
 		}
 		boolean changed = false;
 		Map<String, Rom> fresh = new HashMap<>();
+		List<Rejected> bad = new ArrayList<>();
 		for (Path p : files) {
 			try {
 				String rel = romsDir().relativize(p).toString().replace('\\', '/');
 				long size = Files.size(p), mtime = Files.getLastModifiedTime(p).toMillis();
 				Rom c = cache.get(rel);
 				if (c == null || c.size() != size || c.mtime() != mtime) {
-					c = describe(rel, p, size, mtime);
+					Object d = describe(rel, p, size, mtime);
+					c = d instanceof Rom r ? r : null;
+					if (d instanceof Rejected rj) bad.add(rj);
 					changed = true;
 				}
 				if (c != null) {
@@ -127,6 +158,7 @@ public final class RomLibrary {
 			}
 		}
 		if (changed || fresh.size() != cache.size()) saveIndex(fresh);
+		rejected = List.copyOf(bad);
 		out.sort((a, b) -> a.name().compareToIgnoreCase(b.name()));
 		return out;
 	}
@@ -136,41 +168,30 @@ public final class RomLibrary {
 		return null;
 	}
 
-	private static Rom describe(String rel, Path p, long size, long mtime) throws IOException {
-		if (size < 0xC0 || size > 64L * 1024 * 1024) return null;
+	/** A {@link Rom}, or a {@link Rejected} with the reason the file is not a valid ROM. Only valid files are hashed. */
+	private static Object describe(String rel, Path p, long size, long mtime) throws IOException {
+		String file = p.getFileName().toString();
+		byte[] head = new byte[RomHeader.HEAD_BYTES];
+		int headFill = 0;
+		try (InputStream in = Files.newInputStream(p)) {
+			int n;
+			while (headFill < head.length && (n = in.read(head, headFill, head.length - headFill)) > 0) headFill += n;
+		}
+		RomHeader.Result r = RomHeader.parse(file, size, java.util.Arrays.copyOf(head, headFill));
+		if (!r.ok()) return new Rejected(rel, r.error());
 		try (InputStream in = Files.newInputStream(p)) {
 			MessageDigest md = MessageDigest.getInstance("SHA-1");
 			byte[] buf = new byte[1 << 16];
-			byte[] head = new byte[0xC0];
-			int headFill = 0;
 			int n;
-			while ((n = in.read(buf)) > 0) {
-				md.update(buf, 0, n);
-				if (headFill < head.length) {
-					int c = Math.min(n, head.length - headFill);
-					System.arraycopy(buf, 0, head, headFill, c);
-					headFill += c;
-				}
-			}
-			String title = ascii(head, 0xA0, 12);
-			String code = ascii(head, 0xAC, 4);
-			String file = p.getFileName().toString();
-			String name = file.substring(0, file.length() - 4).trim();
-			if (name.isEmpty()) name = title;
-			return new Rom(rel, size, mtime, hex(md.digest()), name, title, code);
+			while ((n = in.read(buf)) > 0) md.update(buf, 0, n);
+			int dot = file.lastIndexOf('.');
+			String name = (dot > 0 ? file.substring(0, dot) : file).trim();
+			RomHeader h = r.header();
+			if (name.isEmpty()) name = h.title();
+			return new Rom(rel, size, mtime, hex(md.digest()), name, h.title(), h.code(), h.system(), r.warning());
 		} catch (java.security.NoSuchAlgorithmException e) {
 			throw new IOException(e);
 		}
-	}
-
-	private static String ascii(byte[] b, int off, int len) {
-		StringBuilder sb = new StringBuilder();
-		for (int i = off; i < off + len; i++) {
-			int c = b[i] & 0xFF;
-			if (c == 0) break;
-			if (c >= 0x20 && c < 0x7F) sb.append((char) c);
-		}
-		return sb.toString().trim();
 	}
 
 	private static String hex(byte[] d) {

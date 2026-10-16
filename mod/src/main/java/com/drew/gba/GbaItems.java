@@ -109,6 +109,7 @@ public final class GbaItems {
 		t.putString("sha1", p.sha1());
 		t.putString("title", p.title());
 		t.putString("code", p.code());
+		if (p.gameBoy()) t.putString("system", p.system()); // GBA paks stay byte-identical to the ones made before 0.5.0
 		return t;
 	}
 
@@ -118,7 +119,7 @@ public final class GbaItems {
 			UUID id = UUID.fromString(t.getStringOr("pakId", ""));
 			String sha1 = t.getStringOr("sha1", "");
 			if (!PakData.validSha1(sha1)) return null;
-			return new PakData(id, sha1, t.getStringOr("title", ""), t.getStringOr("code", ""));
+			return new PakData(id, sha1, t.getStringOr("title", ""), t.getStringOr("code", ""), t.getStringOr("system", PakData.SYS_GBA));
 		} catch (IllegalArgumentException e) {
 			return null;
 		}
@@ -145,10 +146,13 @@ public final class GbaItems {
 		g.putString("sha1", p.sha1());
 		g.putString("title", p.title());
 		g.putString("code", p.code());
+		if (p.gameBoy()) g.putString("system", p.system());
 		write(s, g);
-		s.set(DataComponents.LORE, new ItemLore(List.of(
-			Component.literal(p.title().isEmpty() ? "Unknown game" : p.title()).withColor(0xC8B6FF),
-			Component.literal(p.code()).withColor(0x808080))));
+		List<Component> lore = new java.util.ArrayList<>();
+		lore.add(Component.literal(p.title().isEmpty() ? "Unknown game" : p.title()).withColor(0xC8B6FF));
+		lore.add(Component.literal(p.code()).withColor(0x808080));
+		if (p.gameBoy()) lore.add(Component.literal(PakData.systemName(p.system())).withColor(0x808080));
+		s.set(DataComponents.LORE, new ItemLore(lore));
 		return s;
 	}
 

@@ -59,6 +59,7 @@ public class GbaLinkClient implements ClientModInitializer {
 	public void onInitializeClient() {
 		ClientConfig.init(FabricLoader.getInstance().getConfigDir());
 		RomLibrary.init(FabricLoader.getInstance().getGameDir());
+		ControlMap.init(RomLibrary.baseDir());
 		RomLibrary.ensureFolders(); // gbalink/roms (+README) and gbalink/imports exist from the first start
 		// Dev-only end-to-end scenario driver. Completely inert (class never loaded) without the property.
 		if (System.getProperty("gbalink.autotest") != null) AutoTest.start();
@@ -71,6 +72,7 @@ public class GbaLinkClient implements ClientModInitializer {
 			if (pak == null) return;
 			if (GbaItems.is(stack, GbaItems.GBA) && !pak.title().isEmpty())
 				lines.add(Component.literal("Game: " + pak.title()).withStyle(net.minecraft.ChatFormatting.GRAY));
+			lines.add(Component.literal(com.drew.gba.server.PakData.systemName(pak.system())).withStyle(net.minecraft.ChatFormatting.DARK_GRAY));
 			lines.add(Component.literal("ROM ID: " + romId(pak.sha1())).withStyle(net.minecraft.ChatFormatting.DARK_GRAY));
 		});
 
@@ -187,11 +189,23 @@ public class GbaLinkClient implements ClientModInitializer {
 		if (s != null) s.netplay().onSnapshot(p.sessionId(), p.from(), p.gen(), p.frame(), p.offset(), p.total(), p.bytes());
 	}
 
-	/** CAP_NETPLAY | CAP_NETPLAY_LOCKSTEP if the native library has lockstep groups (API 3). Loads the library, which is cheap and cached. */
+	/** True if the loaded native library can run Game Boy / Game Boy Color games (API 4). False if it is missing or older. */
+	public static boolean gameBoySupported() {
+		try {
+			GbaNative n = GbaNative.get(FabricLoader.getInstance().getGameDir());
+			return n != null && n.supportsGameBoy();
+		} catch (Throwable t) {
+			return false;
+		}
+	}
+
+	/** Capability bits for Hello: netplay (native API 3) and Game Boy (API 4). Loads the library, which is cheap and cached. */
 	private static int netplayCaps() {
 		try {
 			GbaNative n = GbaNative.get(FabricLoader.getInstance().getGameDir());
-			return n != null && n.supportsNetplay() ? Payloads.Hello.CAP_NETPLAY | Payloads.Hello.CAP_NETPLAY_LOCKSTEP : 0;
+			if (n == null) return 0;
+			return (n.supportsNetplay() ? Payloads.Hello.CAP_NETPLAY | Payloads.Hello.CAP_NETPLAY_LOCKSTEP : 0)
+				| (n.supportsGameBoy() ? Payloads.Hello.CAP_GAMEBOY : 0);
 		} catch (Throwable t) {
 			return 0;
 		}
@@ -238,7 +252,7 @@ public class GbaLinkClient implements ClientModInitializer {
 		if (rom == null) {
 			closeOnServer(pakId, crt);
 			client.gui.setScreen(new GbaScreen(List.of("You don't have this game (" + title + ").",
-				"Put the .gba file in .minecraft/gbalink/roms/")));
+				"Put the .gba / .gb / .gbc file in .minecraft/gbalink/roms/")));
 			return;
 		}
 		GbaNative natives = GbaNative.get(gameDir);
@@ -248,12 +262,19 @@ public class GbaLinkClient implements ClientModInitializer {
 				"Platform: " + GbaNative.platform())));
 			return;
 		}
+		if (rom.gameBoy() && !natives.supportsGameBoy()) {
+			closeOnServer(pakId, crt);
+			client.gui.setScreen(new GbaScreen(List.of(title + " is a " + com.drew.gba.rom.RomHeader.systemName(rom.system()) + " game,",
+				"but the emulator library is too old for Game Boy games (API " + natives.apiVersion() + ", needs 4).",
+				"Update the GBA Link mod.")));
+			return;
+		}
 		Path state = migrateState(pakId, rom.sha1());
 		Path suspend = RomLibrary.suspendDir().resolve(pakId + ".state");
-		Resume r = planResume(suspend, revision, rom.sha1());
+		Resume r = planResume(suspend, revision, rom.sha1(), rom.system());
 		EmulatorSession s = new EmulatorSession(natives, new EmulatorSession.Config(pakId, title, rom.sha1(), rom.path(),
 			state, suspend, RomLibrary.savesDir().resolve(pakId + ".sav"), RomLibrary.exportsDir(), save, revision,
-			r.state, r.toast, linkIndex, linkCount, linkNames));
+			r.state, rom.warning().isEmpty() ? r.toast : "Warning: " + rom.warning(), linkIndex, linkCount, linkNames, rom.system()));
 		current = s;
 		if (crt != null) {
 			CrtClient.beginOwn(crt.crtId(), crt.x(), crt.y(), crt.z(), crt.yaw(), s);
@@ -267,6 +288,11 @@ public class GbaLinkClient implements ClientModInitializer {
 
 	/** Reads the suspend file (if any), applies the consistency guard, and deletes it when it must not be used. */
 	static Resume planResume(Path suspend, String serverRevision, String romSha1) {
+		return planResume(suspend, serverRevision, romSha1, null);
+	}
+
+	/** {@code system}: "gba", "gb" or "gbc"; a suspend state of another system is discarded (null skips that check). */
+	static Resume planResume(Path suspend, String serverRevision, String romSha1, String system) {
 		SuspendFile sf = null;
 		boolean unreadable = false;
 		if (Files.isRegularFile(suspend)) {
@@ -277,7 +303,7 @@ public class GbaLinkClient implements ClientModInitializer {
 				unreadable = true;
 			}
 		}
-		SaveRules.Resume d = SaveRules.decide(sf, unreadable, serverRevision, romSha1);
+		SaveRules.Resume d = SaveRules.decide(sf, unreadable, serverRevision, romSha1, system);
 		switch (d) {
 			case RESUME:
 				return new Resume(sf.state(), "");
@@ -318,9 +344,14 @@ public class GbaLinkClient implements ClientModInitializer {
 		}
 	}
 
-	/** Burn {@code rom} onto the held Blank Game Pak. */
+	/** Burn {@code rom} onto the held Blank Game Pak. The system is only sent for Game Boy games (GBA burns keep the 0.4 layout). */
 	public static void burn(RomLibrary.Rom rom) {
-		ClientPlayNetworking.send(new Payloads.Burn(rom.sha1(), rom.name(), rom.code()));
+		if (rom.gameBoy() && !gameBoySupported()) {
+			Minecraft.getInstance().gui.hud.setOverlayMessage(Component.literal("The emulator library is too old for Game Boy games - update the GBA Link mod"), false);
+			return;
+		}
+		ClientPlayNetworking.send(new Payloads.Burn(rom.sha1(), rom.name(), rom.code(), rom.system()));
+		if (!rom.warning().isEmpty()) Minecraft.getInstance().gui.hud.setOverlayMessage(Component.literal("Warning: " + rom.warning()), false);
 	}
 
 	private static void closeOnServer(UUID pakId, Payloads.CrtOpen crt) {

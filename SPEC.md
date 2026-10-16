@@ -31,6 +31,10 @@ typedef struct gba_core gba_core;
 
 #define GBA_WIDTH  240
 #define GBA_HEIGHT 160
+#define GB_WIDTH   160         /* Game Boy / Game Boy Color screen (API version 4, 0.5.0) */
+#define GB_HEIGHT  144
+#define GBA_PLATFORM_GBA 0     /* gba_platform() */
+#define GBA_PLATFORM_GB  1     /* Game Boy and Game Boy Color */
 #define GBA_AUDIO_RATE 32768   /* output sample rate, stereo int16 interleaved */
 #define GBA_LINK_MSG_MAX 64    /* max bytes of one opaque link message */
 
@@ -41,29 +45,41 @@ typedef struct gba_core gba_core;
                                   to continue the SAME frame */
 #define GBA_RUN_ERROR     -1
 
-uint32_t    gba_api_version(void);              /* returns 2 for this spec (1 = without gba_set_rtc) */
+uint32_t    gba_api_version(void);              /* returns 4 for this spec (3 = GBA only, 2 = no groups, 1 = without gba_set_rtc) */
 gba_core*   gba_create(void);
 void        gba_destroy(gba_core*);
 
+/* Loads a GBA, Game Boy or Game Boy Color ROM; the system is detected from the contents (mGBA's header check: the
+   Game Boy logo at 0x104), never from the file name. Anything else loads as GBA. Game Boy ROMs > 8 MiB and GBA ROMs
+   > 32 MiB fail (-2). May replace the core; a pending virtual RTC is cleared (call gba_set_rtc again). */
 int         gba_load_rom(gba_core*, const char* utf8_path);   /* 0 ok, <0 error */
 void        gba_reset(gba_core*);
-/* Fill buf with the ROM's internal title (12 chars) + game code (4 chars) NUL-terminated. */
+/* Fill buf with the ROM's internal title (up to 12 chars) + game code (4 chars) NUL-terminated.
+   Game Boy / Color: title = up to 11 printable chars at 0x134; code = the manufacturer code at 0x13F..0x142 when those are
+   4 upper-case letters/digits, else 'G' + 3 hex digits (header checksum 0x14D, low nibble of global checksum 0x14F). */
 int         gba_rom_info(gba_core*, char* title_out /*>=13*/, char* code_out /*>=5*/);
 
+/* ---- Platform (API version 4) ---- */
+int         gba_platform(gba_core*);            /* GBA_PLATFORM_GBA or GBA_PLATFORM_GB */
+int         gba_frame_width(gba_core*);         /* 240 (GBA) / 160 (Game Boy) */
+int         gba_frame_height(gba_core*);        /* 160 / 144 */
+
 /* Keys: GBA KEYINPUT bit order, 1 = pressed.
-   A=0 B=1 Select=2 Start=3 Right=4 Left=5 Up=6 Down=7 R=8 L=9 */
+   A=0 B=1 Select=2 Start=3 Right=4 Left=5 Up=6 Down=7 R=8 L=9. Game Boy / Color: bits 0-7 are A, B, Select, Start and the
+   D-pad (same order), R and L are ignored. */
 void        gba_set_keys(gba_core*, uint32_t keymask);
 
 int         gba_run_frame(gba_core*);           /* returns GBA_RUN_* */
 
-/* 240*160 pixels, row-major, each pixel 4 bytes in memory order R,G,B,A (A=255).
-   Valid until the next gba_run_frame. */
+/* gba_frame_width() x gba_frame_height() pixels (240x160 GBA, 160x144 Game Boy), row-major, each pixel 4 bytes in memory
+   order R,G,B,A (A=255). Valid until the next gba_run_frame. */
 const uint8_t* gba_framebuffer(gba_core*);
 
 /* Drain up to max_frames stereo frames (2 int16 each) produced so far. Returns frames written. */
 size_t      gba_read_audio(gba_core*, int16_t* out, size_t max_frames);
 
-/* Battery save (SRAM/Flash/EEPROM, plus RTC if present), in mGBA's .sav format. */
+/* Battery save (SRAM/Flash/EEPROM, plus RTC if present), in mGBA's .sav format. Game Boy: the cartridge RAM plus the
+   48 byte VBA-compatible clock footer for MBC3+RTC carts; the size is known right after gba_load_rom (0 = no battery RAM). */
 size_t      gba_save_size(gba_core*);           /* bytes currently in use, 0 = none */
 size_t      gba_get_save(gba_core*, uint8_t* out, size_t cap);   /* returns bytes written */
 int         gba_load_save(gba_core*, const uint8_t* data, size_t len); /* call after load_rom, before first run; 0 ok */
@@ -74,7 +90,9 @@ size_t      gba_state_size(gba_core*);
 size_t      gba_save_state(gba_core*, uint8_t* out, size_t cap);
 int         gba_load_state(gba_core*, const uint8_t* data, size_t len);
 
-/* ---- Link cable ----
+/* ---- Link cable (GBA only) ----
+   A Game Boy core has no link support yet: gba_link_configure and gba_link_deliver are ignored, gba_link_poll_outgoing
+   returns 0 and gba_group_add fails (-1); check gba_platform() first.
    Messages are OPAQUE to Java and the server: Java only forwards bytes between cores.
    player_index: 0 = parent/master, 1..3 = children. player_count < 2 = cable unplugged.
    Changing configuration while GBA_RUN_LINK_WAIT is pending must unblock the core
@@ -127,13 +145,13 @@ Only sent to clients where `ServerPlayNetworking.canSend` is true. Vanilla / non
 clients must be able to join and see the items (no new synced registry entries, no custom
 command argument types).
 
-Protocol number: **4** (0.4.0; 3 was 0.3.0, 2 was 0.2.0). Hello/Welcome carry it; mismatches never crash: the server refuses to `open`
+Protocol number: **4** (0.4.0; 3 was 0.3.0, 2 was 0.2.0). 0.5.0 (Game Boy support) stays on 4: it only appends optional fields. Hello/Welcome carry it; mismatches never crash: the server refuses to `open`
 for a client with a different protocol ("update the mod"), and a client treats a server that sends no `welcome`
 (protocol 1) as unable to do revisions/imports and shows "update the mod". New fields are appended last and
 decoded tolerantly.
 
 - C2S `hello` {protocol, caps} — client announces the mod and its protocol. `caps` (new in 0.4.0, appended; 0 if absent)
-  is a bit set: bit 0 = netplay with the 0.4.0/0.4.1 link driver (native API 2, no longer used for new sessions), bit 1 (`CAP_NETPLAY_LOCKSTEP`, 0.4.2) = the client can run netplay with mGBA lockstep groups (native API version 3).
+  is a bit set: bit 0 = netplay with the 0.4.0/0.4.1 link driver (native API 2, no longer used for new sessions), bit 1 (`CAP_NETPLAY_LOCKSTEP`, 0.4.2) = the client can run netplay with mGBA lockstep groups (native API version 3), bit 2 (`CAP_GAMEBOY`, 0.5.0) = the client's native library can run Game Boy / Game Boy Color games (API 4).
 - S2C `welcome` {protocol} — server's protocol (new in 2; only sent if the client can receive it).
 - S2C `open` {pakId UUID, romSha1 hex, title, save bytes, revision} — open emulator for this pak.
   `revision` (new in 2, appended; "" if absent) = lowercase hex SHA-256 of `save` (a missing save is the hash
@@ -146,12 +164,16 @@ decoded tolerantly.
 - C2S `import_save` {pakId, offset, total, bytes ≤ 30000} — (new in 4; replaces 2/3's burn-time `import_chunk`)
   replace the save of the pak this player **currently has open** (an open session for exactly that pak, GBA or CRT)
   with an imported one. Same chunking as `save_chunk`, rate limited together with uploads. Accepted only with a size of
-  512 B / 8 / 32 / 64 / 128 KiB (+16 byte RTC footer optional), at most 512 KiB (`SaveRules.importRejection`); the
+  512 B / 8 / 32 / 64 / 128 KiB (+16 byte RTC footer optional) for GBA pak, 512 B / 2 / 8 / 32 / 64 / 128 KiB plus an optional clock
+  footer of up to 255 bytes for a Game Boy pak, at most 512 KiB (`SaveRules.importRejection`, by the open session's system); the
   previous save is kept as `<pakId>.sav.bak1` (older ones shift to `.bak2`, `.bak3`, the oldest is dropped) and any
   half-finished normal upload is dropped. The server always answers with `save_ack` (accepted=false and the unchanged
   revision if refused, e.g. no open session or a bad size). Imports for a pak the player does not have open are ignored.
 - C2S `close` {pakId}
-- C2S `burn` {romSha1, title, gameCode} — turn a held Blank Game Pak into a Pak for this ROM.
+- C2S `burn` {romSha1, title, gameCode, system?} — turn a held Blank Game Pak into a Pak for this ROM. `system` (0.5.0, appended,
+  `"gba"` if absent): `"gb"` or `"gbc"` for Game Boy games. Clients only append it for Game Boy ROMs, so burning a GBA game
+  is byte-identical to 0.4.x, and the server reads a missing field as GBA. The server accepts Game Boy burns and opens
+  Game Boy paks only for clients that announced `CAP_GAMEBOY` ("update the mod" otherwise).
 - S2C `link_state` {playerIndex, playerCount, names[], mode} — (count < 2 = unplugged). `mode` (new in 0.4.0, appended; 0 if
   absent): 0 = classic link, 1 = netplay (the classic cable stays unplugged, `netplay_start` follows).
 - S2C `cable_state` {myIndex, count, (name, open)[]} — **optional, additive (0.4.2)**: only sent to clients that registered
@@ -162,8 +184,9 @@ decoded tolerantly.
   bar message "<name> unplugged the link cable."
 - C2S `link_data` {bytes ≤ 64} → server → S2C `link_data` {fromIndex, bytes} to other members.
 
-Revision guard: client-side suspend file `gbalink/suspend/<pakId>.state` = magic, version, revision, ROM SHA-1,
-confirmed flag, core state. On `open` it is resumed only if its revision equals the `open` revision and the ROM
+Revision guard: client-side suspend file `gbalink/suspend/<pakId>.state` = magic, version, (version 2, 0.5.0: system `gba|gb|gbc`,)
+revision, ROM SHA-1, confirmed flag, core state. Version 1 files (0.4.x) still read as GBA; a suspend state of another system is
+discarded. On `open` it is resumed only if its revision equals the `open` revision and the ROM
 SHA-1 matches; otherwise it is deleted and the game cold-boots with the server save. On import (client): the current save is exported to `exports/<game>-<time>-before-import.sav`, the new one is uploaded
 with `import_save`, and on an accepting `save_ack` (revision equals the SHA-256 of what was sent) the suspend file for that
 pak is deleted, the local mirror is rewritten and the core is reloaded from the imported save (cold boot, same session).
@@ -173,6 +196,37 @@ what it sent, flagged unconfirmed, if no ack arrives or the connection is gone).
 
 `gba_get_save` returns mGBA's battery format: the raw SRAM/Flash/EEPROM image, plus a 16-byte RTC footer for
 cartridges with a clock. `gba_get_save` resets the "dirty" flag.
+
+## Game Boy and Game Boy Color (0.5.0, phase 1: single player)
+
+The same items play `.gb`, `.gbc` and `.gba` games (the CRT is a console plus Game Boy Player). Native: mGBA's GB/GBC core is built
+into the library next to the GBA core (`gba_*` API above, version 4; no new dependencies).
+
+* **Detection.** `gba_load_rom` tells the system from the ROM header. The model follows the cartridge's CGB flag (0x143 bit 7):
+  colour games run as a Game Boy Color, everything else as a monochrome Game Boy. Super Game Boy borders are off and SGB-flagged
+  games run as plain DMG (160x144, no SGB colours). No BIOS file is read (mGBA skips the boot ROM).
+* **Colours.** DMG games use a classic green LCD palette (0xE0F8D0, 0x88C070, 0x346856, 0x081820; shades quantised to 5 bits
+  like mGBA's own palette option). GBC games use mGBA's normal colours; no colour correction is applied.
+* **Audio** is resampled to 32768 Hz stereo like GBA (~548.7 frames per video frame, 59.7275 fps).
+* **Saves** are mGBA's `.sav`: cartridge RAM, then for MBC3+RTC cartridges (Pokemon Gold/Silver/Crystal) the VBA-compatible
+  48 byte clock footer (mGBA restores the clock registers from its latched fields). `gba_save_size` is known right after loading.
+  `gba_set_rtc` works for MBC3 RTC carts (wall clock or virtual); the cartridge's last-latch time is kept in step so no phantom time passes.
+* **States** are raw mGBA states (no group trailer). The determinism test (`test_determinism_gb`, CI hash check) pins CRC32 of the full
+  state and framebuffer after 100 / 1000 / 1500 frames of scripted input for a DMG and a CGB test ROM on all four platforms.
+* **ROM files.** `gbalink/roms/` scans `.gba`, `.gb` and `.gbc`. The system comes from the header (a `.gb` file with the CGB flag is a
+  Game Boy Color game): Game Boy ROMs need the Nintendo logo prefix and a valid header checksum and are at most 8 MiB; GBA ROMs need the
+  fixed 0x96 byte and are at most 32 MiB (the complement checksum is not enforced). Invalid files are listed in the burn screen with the
+  reason. `com.drew.gba.rom.RomHeader` (pure Java) reads title and code exactly like `gba_rom_info`.
+* **GBA screen.** The bezel is unchanged. The GB picture is drawn at its own 10:9 aspect, as large as fits the screen well with
+  whole-number scaling where possible (fractional only when the window is too small), centred with the dark well around it, a "GB" /
+  "GBC" tag next to the title, and the L / R shoulder buttons are hidden.
+* **CRT / spectators.** The TV texture and the spectator stream stay 240x160 so the codec, the decoders and every viewer are unchanged:
+  `FrameBuffer.copyLetterboxed` centres the 160x144 picture 1:1 on the canvas with opaque black borders (40 px left and right, 8 px above and below),
+  which is the right aspect on the 3:2 quad and sits pillarboxed in the 4:3 tube. Audio paths are unchanged.
+* **Link cable: not yet.** Game Boy sessions do not take part in the link: the server leaves a Game Boy session out of the effective link
+  (`GbaServer.linkable`, `EffectiveLink.linkSupported`), so it is unplugged, never routes link data and never starts netplay (the others keep
+  linking among themselves), and the client shows "Link cable for Game Boy games isn't supported yet" (status line, cable HUD and a toast). Phase 2
+  will add GB link; nothing in the group / link API assumes GBA only (cores refuse cleanly by platform).
 
 ## Netplay link (0.4.0, protocol 4)
 
@@ -247,7 +301,9 @@ Payloads (new in 0.4.0; protocol number unchanged at 4 for this release):
 
 Vanilla base item + components: `custom_data` {gbalink:{type:"gba"|"pak"|"blank_pak"|"cable"|"crt", ...}},
 `item_model` "gbalink:<type>", `item_name`, `max_stack_size` 1 (cable may stack).
-Pak data: {pakId UUID, sha1, title, code}. GBA may hold an inserted pak: {pak:{...}}.
+Pak data: {pakId UUID, sha1, title, code, system?}. `system` (0.5.0, optional): `"gb"` or `"gbc"`; absent = GBA, and GBA paks
+are written without it, so everything made before 0.5.0 is unchanged. A Game Pak's lore adds a line with the system name for Game Boy
+games and the client tooltip always shows it (Game Boy / Game Boy Color / Game Boy Advance). GBA may hold an inserted pak: {pak:{...}}.
 Saves live server-side at `world/gbalink/saves/<pakId>.sav` and travel with the pak item.
 
 ## CRT TV (0.3.0, protocol 3)

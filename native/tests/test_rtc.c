@@ -45,7 +45,7 @@ int main(int argc, char** argv) {
 	if (argc < 2) return 2;
 	const int64_t epoch = 1760000000; /* 2025-10-09 08:53:20 UTC */
 	printf("api version %u\n", gba_api_version());
-	CHECK(gba_api_version() == 3, "api version");
+	CHECK(gba_api_version() == 4, "api version");
 
 	/* wall mode by default: tracks time() */
 	gba_core* a = make(argv[1]);

@@ -77,4 +77,31 @@ class EffectiveLinkTest {
 		assertFalse(st.get("a").netplay());
 		assertNotEquals(EffectiveLink.states(ROOM, java.util.Set.of("c", "d")::contains, false).get("c"), st.get("c"));
 	}
+
+	@Test
+	void gameBoyPlayersAreLeftOutOfTheLinkWithoutBreakingTheOthers() {
+		// a, b and c have a session open; c plays a Game Boy game (not linkable yet), d has nothing open
+		Set<String> open = Set.of("a", "b", "c");
+		Set<String> gb = Set.of("c");
+		java.util.function.Predicate<String> linkable = k -> open.contains(k) && EffectiveLink.linkSupported(gb.contains(k) ? "gbc" : "gba");
+		Map<String, EffectiveLink.State> s = EffectiveLink.states(ROOM, linkable);
+		assertEquals(new EffectiveLink.State(0, 2), s.get("a"));
+		assertEquals(new EffectiveLink.State(1, 2), s.get("b"));
+		assertEquals(EffectiveLink.State.UNPLUGGED, s.get("c"), "the Game Boy player is behaving as unlinked");
+		assertEquals(EffectiveLink.State.UNPLUGGED, s.get("d"));
+		assertEquals(List.of("a", "b"), EffectiveLink.active(ROOM, linkable));
+		assertEquals(-1, EffectiveLink.indexOf(ROOM, linkable, "c"));
+		// netplay needs two linkable players; a Game Boy game never takes part, whatever its ROM hash
+		assertFalse(EffectiveLink.netplay(EffectiveLink.active(ROOM, k -> k.equals("a") || k.equals("c") ? linkable.test(k) : false), k -> "h", k -> true));
+		assertTrue(EffectiveLink.netplay(EffectiveLink.active(ROOM, linkable), k -> "same", k -> true));
+	}
+
+	@Test
+	void onlyGameBoySystemsAreUnsupported() {
+		assertTrue(EffectiveLink.linkSupported(null));
+		assertTrue(EffectiveLink.linkSupported("gba"));
+		assertTrue(EffectiveLink.linkSupported("junk"), "unknown systems count as gba, like PakData");
+		assertFalse(EffectiveLink.linkSupported("gb"));
+		assertFalse(EffectiveLink.linkSupported("GBC"));
+	}
 }

@@ -151,7 +151,7 @@ jobs:
           pattern: natives-*
           merge-multiple: true
           path: dist/natives
-      - name: Run the dual-sim hash check (2 and 3 consoles, 3000 frames, fixed ROM and inputs, virtual RTC)
+      - name: Run the dual-sim hash check (2 and 3 consoles, 3000 frames) and the Game Boy / Game Boy Color hash check (1500 frames), fixed ROMs and inputs, virtual RTC
         shell: bash
         run: |
           set -e
@@ -165,7 +165,7 @@ jobs:
             $S/client/java/com/drew/gba/client/netplay/NetplaySim.java \
             $S/test/java/com/drew/gba/client/netplay/NetplayHashCheck.java
           java --enable-native-access=ALL-UNNAMED -cp out com.drew.gba.client.netplay.NetplayHashCheck \
-            game $S/test/resources/roms/link_pokesim.gba "hashes-${{ matrix.name }}.txt"
+            game $S/test/resources/roms/link_pokesim.gba "hashes-${{ matrix.name }}.txt" $S/test/resources/roms
           cat "hashes-${{ matrix.name }}.txt"
       - uses: actions/upload-artifact@v4
         with:

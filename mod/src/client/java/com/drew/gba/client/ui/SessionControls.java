@@ -1,5 +1,6 @@
 package com.drew.gba.client.ui;
 
+import com.drew.gba.client.ControlMap;
 import com.drew.gba.client.emu.EmulatorSession;
 import com.mojang.blaze3d.platform.InputConstants;
 import net.minecraft.client.gui.Font;
@@ -51,11 +52,11 @@ public final class SessionControls {
 	// ------------------------------------------------------------------ buttons
 
 	Button save(int x, int y, int w, int h) {
-		return Button.builder(Component.literal("Save (F5)"), b -> session.saveStateAsync()).bounds(x, y, w, h).build();
+		return Button.builder(Component.literal("Save (" + GbaKeys.keyName(ControlMap.Action.SAVE_STATE) + ")"), b -> session.saveStateAsync()).bounds(x, y, w, h).build();
 	}
 
 	Button load(int x, int y, int w, int h) {
-		return Button.builder(Component.literal("Load (F8)"), b -> session.loadStateAsync()).bounds(x, y, w, h).build();
+		return Button.builder(Component.literal("Load (" + GbaKeys.keyName(ControlMap.Action.LOAD_STATE) + ")"), b -> session.loadStateAsync()).bounds(x, y, w, h).build();
 	}
 
 	Button export(int x, int y, int w, int h) {
@@ -64,6 +65,22 @@ public final class SessionControls {
 
 	Button importSav(int x, int y, int w, int h) {
 		return Button.builder(Component.literal("Import .sav"), b -> openImport()).bounds(x, y, w, h).build();
+	}
+
+	/** "Controls": the key map screen, opened over this one; the game keeps running behind it. */
+	Button controls(int x, int y, int w, int h) {
+		return Button.builder(Component.literal("Controls"), b -> openControls()).bounds(x, y, w, h).build();
+	}
+
+	void openControls() {
+		session.releaseAll(); // the Controls screen swallows the key releases
+		session.turbo = false;
+		host.importStarting(); // a child screen opens over ours: removed() must not suspend the game
+		net.minecraft.client.Minecraft.getInstance().gui.setScreen(new ControlsScreen(host.screen()));
+	}
+
+	String powerLabel() {
+		return "POWER OFF (" + GbaKeys.keyName(ControlMap.Action.POWER) + ")";
 	}
 
 	/** "Unlink (U)": take yourself off the link cable. Callers show it only while {@link com.drew.gba.client.ClientCable#linked()}. */
@@ -118,7 +135,7 @@ public final class SessionControls {
 		boolean ok = session.error() == null && !session.isFinished();
 		GuiSprites.sprite(g, ok ? "led_green" : "led_red", cx + SW_W / 2 + 8, cy, 8, 8);
 		if (hover && hoverLabel) {
-			String t = "POWER OFF (P)";
+			String t = powerLabel();
 			g.text(font, t, cx - font.width(t) / 2, cy + SW_H / 2 + 3, 0xFFFFE08A, false);
 		}
 	}

@@ -10,6 +10,12 @@
 #include <mgba/core/log.h>
 #include <mgba/core/timing.h>
 #include <mgba/gba/core.h>
+#include <mgba/gb/core.h>
+#include <mgba/gb/interface.h>
+#include <mgba/internal/gb/gb.h>
+#include <mgba/internal/gb/io.h>
+#include <mgba/internal/gb/mbc.h>
+#include <mgba/internal/gb/video.h>
 #include <mgba/gba/interface.h>
 #include <mgba/internal/arm/arm.h>
 #include <mgba/internal/gba/cart/gpio.h>
@@ -27,7 +33,8 @@
 #include <string.h>
 #include <time.h>
 
-#define GBA_API_VERSION 3u
+#define GBA_API_VERSION 4u
+#define GB_MAX_ROM_BYTES (8 * 1024 * 1024)
 
 /* ------------------------------------------------------------------------------------ */
 /* link layer                                                                           */
@@ -101,7 +108,9 @@ struct gba_link {
 
 struct gba_core {
 	struct mCore* core;     /* must stay first (see gbacore_priv.h users) */
-	struct GBA* gba;
+	struct GBA* gba;        /* NULL for a Game Boy core */
+	struct GB* gb;          /* NULL for a GBA core (API 4) */
+	int platform;           /* GBA_PLATFORM_* */
 	color_t* video;
 	bool romLoaded;
 	bool frameActive;
@@ -682,6 +691,9 @@ static uint8_t unBcd(uint8_t b) { return (uint8_t) ((b >> 4) * 10 + (b & 0xF)); 
 /* After leaving the virtual clock: recompute the save-time offset exactly like GBASavedataRTCRead does, but with the
  * local time zone again, so the in-game clock continues from the time it showed instead of jumping by the UTC offset. */
 static void rtcRebaseOffset(gba_core* c) {
+	if (!c->gba) {
+		return; /* Game Boy: the cartridge clock works in UNIX time, no time zone involved */
+	}
 	struct GBACartridgeHardware* hw = &c->gba->memory.hw;
 	if (!(hw->devices & HW_RTC) || hw->rtc.lastLatch == 0) {
 		return;
@@ -718,34 +730,79 @@ static void grpDetach(gba_core* c);
 
 GBA_API uint32_t gba_api_version(void) { return GBA_API_VERSION; }
 
+/* Game Boy palette for monochrome (DMG) games, 0xRRGGBB, lightest first. */
+static const uint32_t g_dmgPalette[4] = { 0xE0F8D0, 0x88C070, 0x346856, 0x081820 };
+
+static int frameW(const gba_core* c) { return c->platform == GBA_PLATFORM_GB ? GB_WIDTH : GBA_WIDTH; }
+static int frameH(const gba_core* c) { return c->platform == GBA_PLATFORM_GB ? GB_HEIGHT : GBA_HEIGHT; }
+
+static void coreTeardown(gba_core* c) {
+	if (!c->core) {
+		return;
+	}
+	c->link.dead = true;
+	mCoreConfigDeinit(&c->core->config);
+	c->core->deinit(c->core); /* unloads ROM, closes the save VFile and frees the core */
+	c->core = NULL;
+	c->gba = NULL;
+	c->gb = NULL;
+	c->saveVf = NULL;
+	c->romLoaded = false;
+}
+
+/* (Re)create the mGBA core for a platform. Returns false on failure (the gba_core then has no core). */
+static bool coreInstall(gba_core* c, int platform) {
+	coreTeardown(c);
+	struct mCore* core = platform == GBA_PLATFORM_GB ? GBCoreCreate() : GBACoreCreate();
+	if (!core || !core->init(core)) {
+		return false;
+	}
+	mCoreInitConfig(core, NULL);
+	c->core = core;
+	c->platform = platform;
+	c->frameActive = false;
+	core->setVideoBuffer(core, c->video, platform == GBA_PLATFORM_GB ? GB_WIDTH : GBA_WIDTH);
+	core->setAudioBufferSize(core, 4096);
+	blip_set_rates(core->getAudioChannel(core, 0), core->frequency(core), GBA_AUDIO_RATE);
+	blip_set_rates(core->getAudioChannel(core, 1), core->frequency(core), GBA_AUDIO_RATE);
+	if (platform == GBA_PLATFORM_GB) {
+		struct GB* gb = core->board;
+		c->gb = gb;
+		c->gba = NULL;
+		core->opts.skipBios = true;
+		core->opts.useBios = false; /* no BIOS file is ever read */
+		/* Super Game Boy borders off; SGB-enhanced games run as plain DMG (no border, no SGB colours). */
+		gb->video.sgbBorders = false;
+		mCoreConfigSetValue(&core->config, "sgb.model", "DMG");
+		/* classic green LCD palette for monochrome games (BG, OBJ0, OBJ1 use the same four shades) */
+		int i;
+		for (i = 0; i < 12; ++i) {
+			GBVideoSetPalette(&gb->video, (unsigned) i, g_dmgPalette[i & 3]);
+		}
+		c->link.dead = true; /* no serial link for Game Boy cores yet */
+	} else {
+		c->gba = core->board;
+		c->gb = NULL;
+		linkInit(c);
+	}
+	return true;
+}
+
 GBA_API gba_core* gba_create(void) {
 	mLogSetDefaultLogger(&g_nullLogger);
 	struct gba_core* c = calloc(1, sizeof(*c));
 	if (!c) {
 		return NULL;
 	}
-	c->core = GBACoreCreate();
-	if (!c->core || !c->core->init(c->core)) {
-		free(c);
-		return NULL;
-	}
-	struct mCore* core = c->core;
-	mCoreInitConfig(core, NULL);
-	c->gba = core->board;
 	c->video = calloc((size_t) GBA_WIDTH * GBA_HEIGHT, sizeof(color_t));
 	c->ring = calloc((size_t) AUDIO_RING * 2, sizeof(int16_t));
-	if (!c->video || !c->ring) {
-		core->deinit(core);
+	if (!c->video || !c->ring || !coreInstall(c, GBA_PLATFORM_GBA)) {
+		coreTeardown(c);
 		free(c->video);
 		free(c->ring);
 		free(c);
 		return NULL;
 	}
-	core->setVideoBuffer(core, c->video, GBA_WIDTH);
-	core->setAudioBufferSize(core, 4096);
-	blip_set_rates(core->getAudioChannel(core, 0), core->frequency(core), GBA_AUDIO_RATE);
-	blip_set_rates(core->getAudioChannel(core, 1), core->frequency(core), GBA_AUDIO_RATE);
-	linkInit(c);
 	return c;
 }
 
@@ -761,8 +818,7 @@ GBA_API void gba_destroy(gba_core* c) {
 		c->rtcVirtual = false;
 		tzRelease();
 	}
-	mCoreConfigDeinit(&c->core->config);
-	c->core->deinit(c->core); /* unloads ROM, closes the save VFile and frees the core */
+	coreTeardown(c);
 	free(c->video);
 	free(c->shown);
 	free(c->stash);
@@ -777,22 +833,33 @@ static void resetFrameState(gba_core* c) {
 	blip_clear(c->core->getAudioChannel(c->core, 1));
 }
 
+/* After a Game Boy core was reset: monochrome games need the palette registers re-evaluated with our shades. */
+static void gbApplyPalette(gba_core* c) {
+	struct GB* gb = c->gb;
+	if (gb && gb->model < GB_MODEL_CGB) {
+		GBVideoWritePalette(&gb->video, GB_REG_BGP, gb->memory.io[GB_REG_BGP]);
+		GBVideoWritePalette(&gb->video, GB_REG_OBP0, gb->memory.io[GB_REG_OBP0]);
+		GBVideoWritePalette(&gb->video, GB_REG_OBP1, gb->memory.io[GB_REG_OBP1]);
+	}
+}
+
+GBA_API int gba_platform(gba_core* c) { return c ? c->platform : GBA_PLATFORM_GBA; }
+GBA_API int gba_frame_width(gba_core* c) { return c ? frameW(c) : GBA_WIDTH; }
+GBA_API int gba_frame_height(gba_core* c) { return c ? frameH(c) : GBA_HEIGHT; }
+
 GBA_API int gba_load_rom(gba_core* c, const char* path) {
 	if (!c || !path) {
 		return -1;
 	}
-	struct mCore* core = c->core;
-	if (c->romLoaded) {
-		core->unloadROM(core); /* also closes the old save VFile */
-		c->romLoaded = false;
-		c->saveVf = NULL;
+	if (c->group) {
+		grpDetach(c); /* loading a ROM dissolves the lockstep group */
 	}
 	struct VFile* src = VFileOpen(path, O_RDONLY);
 	if (!src) {
 		return -1;
 	}
-	/* Read the whole ROM into memory and call GBALoadROM directly: going through core->loadROM
-	 * would run mGBA's "multiboot" heuristic, which misdetects small cartridges as EWRAM images. */
+	/* Read the whole ROM into memory and load it directly: going through core->loadROM would run mGBA's
+	 * "multiboot" heuristic for GBA, which misdetects small cartridges as EWRAM images. */
 	ssize_t size = src->size(src);
 	if (size <= 0 || size > SIZE_CART0) {
 		src->close(src);
@@ -811,7 +878,35 @@ GBA_API int gba_load_rom(gba_core* c, const char* path) {
 	}
 	struct VFile* vf = VFileMemChunk(buf, (size_t) size);
 	free(buf);
-	if (!vf || !GBALoadROM(c->gba, vf)) { /* takes ownership of vf */
+	if (!vf) {
+		return -2;
+	}
+	/* The system comes from the ROM contents (mGBA's header checks: Game Boy cartridge logo at 0x104), not from the
+	 * file name. Everything that is not a Game Boy ROM is loaded as GBA, as before. */
+	int platform = mCoreIsCompatible(vf) == mPLATFORM_GB ? GBA_PLATFORM_GB : GBA_PLATFORM_GBA;
+	if (platform == GBA_PLATFORM_GB && size > GB_MAX_ROM_BYTES) {
+		vf->close(vf);
+		return -2;
+	}
+	bool wasLoaded = c->romLoaded;
+	if (platform == GBA_PLATFORM_GB || c->platform != platform) {
+		/* a fresh Game Boy core per ROM: mGBA keeps the detected hardware model across loads */
+		if (c->rtcVirtual) {
+			c->rtcVirtual = false;
+			tzRelease();
+		}
+		if (!coreInstall(c, platform)) {
+			vf->close(vf);
+			return -3;
+		}
+	} else if (wasLoaded) {
+		c->core->unloadROM(c->core); /* also closes the old save VFile */
+		c->romLoaded = false;
+		c->saveVf = NULL;
+	}
+	struct mCore* core = c->core;
+	bool ok = platform == GBA_PLATFORM_GB ? GBLoadROM(c->gb, vf) : GBALoadROM(c->gba, vf); /* takes ownership of vf */
+	if (!ok) {
 		return -2;
 	}
 	c->saveVf = VFileMemChunk(NULL, 0);
@@ -819,10 +914,13 @@ GBA_API int gba_load_rom(gba_core* c, const char* path) {
 		return -3;
 	}
 	core->reset(core);
+	gbApplyPalette(c);
 	c->romLoaded = true;
 	c->lastSaveHash = 0;
 	resetFrameState(c);
-	linkReset(&c->link);
+	if (c->platform == GBA_PLATFORM_GBA) {
+		linkReset(&c->link);
+	}
 	return 0;
 }
 
@@ -831,13 +929,53 @@ GBA_API void gba_reset(gba_core* c) {
 		return;
 	}
 	c->core->reset(c->core);
+	gbApplyPalette(c);
 	resetFrameState(c);
-	linkReset(&c->link);
+	if (c->platform == GBA_PLATFORM_GBA) {
+		linkReset(&c->link);
+	}
 }
+
+/* Game Boy header text: printable ASCII only, stops at the first other byte. */
+static void gbText(const uint8_t* src, size_t n, char* out) {
+	size_t i;
+	for (i = 0; i < n && src[i] >= 0x20 && src[i] < 0x7F; ++i) {
+		out[i] = (char) src[i];
+	}
+	out[i] = 0;
+}
+
+static bool gbCodeChar(uint8_t b) { return (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9'); }
 
 GBA_API int gba_rom_info(gba_core* c, char* title_out, char* code_out) {
 	if (!c || !c->romLoaded) {
 		return -1;
+	}
+	if (c->platform == GBA_PLATFORM_GB) {
+		/* Title: up to 11 printable characters at 0x134 (the CGB title area; older cartridges continue to 0x143, which
+		 * is cut off here). Code (always 4 characters): the manufacturer code at 0x13F..0x142 when it is four
+		 * upper-case letters/digits (later CGB cartridges), else "G" followed by 3 hex digits: the header checksum
+		 * (0x14D) and the low nibble of the global checksum (0x14F). Same rule in the mod's RomLibrary. */
+		const uint8_t* rom = c->gb->memory.rom;
+		if (!rom || c->gb->memory.romSize < 0x150) {
+			return -1;
+		}
+		char t[16];
+		gbText(rom + 0x134, 11, t);
+		memset(title_out, 0, 13);
+		memcpy(title_out, t, strlen(t));
+		const uint8_t* m = rom + 0x13F;
+		if (gbCodeChar(m[0]) && gbCodeChar(m[1]) && gbCodeChar(m[2]) && gbCodeChar(m[3])) {
+			memcpy(code_out, m, 4);
+		} else {
+			static const char hex[] = "0123456789ABCDEF";
+			code_out[0] = 'G';
+			code_out[1] = hex[rom[0x14D] >> 4];
+			code_out[2] = hex[rom[0x14D] & 15];
+			code_out[3] = hex[rom[0x14F] & 15];
+		}
+		code_out[4] = 0;
+		return 0;
 	}
 	char title[32] = { 0 };
 	char code[32] = { 0 };
@@ -856,7 +994,8 @@ GBA_API int gba_rom_info(gba_core* c, char* title_out, char* code_out) {
 
 GBA_API void gba_set_keys(gba_core* c, uint32_t keymask) {
 	if (c) {
-		c->core->setKeys(c->core, keymask & 0x3FF);
+		/* Game Boy: A B Select Start Right Left Up Down are bits 0-7 in the same order as the GBA; L/R (8, 9) are ignored */
+		c->core->setKeys(c->core, keymask & (c->platform == GBA_PLATFORM_GB ? 0xFF : 0x3FF));
 	}
 }
 
@@ -887,7 +1026,7 @@ static void drainAudio(gba_core* c) {
 static void finishFrame(gba_core* c) {
 	color_t* p = c->video;
 	size_t i;
-	for (i = 0; i < (size_t) GBA_WIDTH * GBA_HEIGHT; ++i) {
+	for (i = 0; i < (size_t) frameW(c) * frameH(c); ++i) {
 		p[i] |= 0xFF000000u; /* mGBA writes XBGR8: bytes R,G,B,X in memory -> force A=255 */
 	}
 }
@@ -898,6 +1037,19 @@ GBA_API int gba_run_frame(gba_core* c) {
 	}
 	if (c->group) {
 		return GBA_RUN_ERROR; /* grouped cores run through gba_group_run_frame */
+	}
+	if (c->platform == GBA_PLATFORM_GB) {
+		/* Like mCore::runFrame, but bounded: a broken or truncated ROM can sit in STOP / HALT with the LCD off and never finish
+		 * a frame, which must not hang the emulator thread. After four frames' worth of cycles the frame is reported anyway. */
+		struct GB* gb = c->gb;
+		uint32_t fc = gb->video.frameCounter;
+		int32_t t0 = mTimingCurrentTime(&gb->timing);
+		while (gb->video.frameCounter == fc && mTimingCurrentTime(&gb->timing) - t0 < 4 * GB_VIDEO_TOTAL_LENGTH) {
+			c->core->runLoop(c->core);
+		}
+		finishFrame(c);
+		drainAudio(c);
+		return GBA_RUN_FRAME_DONE;
 	}
 	struct gba_link* L = &c->link;
 	if (L->mstate == M_WAIT) {
@@ -957,7 +1109,34 @@ GBA_API size_t gba_read_audio(gba_core* c, int16_t* out, size_t max_frames) {
 
 /* ---- save data ---- */
 
+/* Game Boy: bytes after the cartridge RAM in the .sav file (clock footer of MBC3+RTC, HuC3, TAMA5 carts). */
+static size_t gbFooterBytes(struct GB* gb) {
+	switch (gb->memory.mbcType) {
+	case GB_MBC3_RTC:
+		return sizeof(struct GBMBCRTCSaveBuffer);
+	case GB_HuC3:
+		return sizeof(struct GBMBCHuC3SaveBuffer);
+	case GB_TAMA5:
+		return sizeof(struct GBMBCTAMA5SaveBuffer);
+	default:
+		return 0;
+	}
+}
+
+static void gbWriteFooter(struct GB* gb) {
+	if (gb->memory.mbcType == GB_MBC3_RTC) {
+		GBMBCRTCWrite(gb);
+	} else if (gb->memory.mbcType == GB_HuC3) {
+		GBMBCHuC3Write(gb);
+	} else if (gb->memory.mbcType == GB_TAMA5) {
+		GBMBCTAMA5Write(gb);
+	}
+}
+
 static size_t saveBytes(gba_core* c) {
+	if (c->platform == GBA_PLATFORM_GB) {
+		return c->gb->sramSize ? c->gb->sramSize + gbFooterBytes(c->gb) : 0;
+	}
 	struct GBASavedata* sd = &c->gba->memory.savedata;
 	switch (sd->type) {
 	case SAVEDATA_AUTODETECT:
@@ -1006,7 +1185,11 @@ GBA_API size_t gba_get_save(gba_core* c, uint8_t* out, size_t cap) {
 	if (!n || n > cap) {
 		return 0;
 	}
-	GBASavedataRTCWrite(&c->gba->memory.savedata);
+	if (c->platform == GBA_PLATFORM_GB) {
+		gbWriteFooter(c->gb);
+	} else {
+		GBASavedataRTCWrite(&c->gba->memory.savedata);
+	}
 	n = saveBytes(c);
 	if (n > cap) {
 		return 0;
@@ -1084,7 +1267,7 @@ GBA_API size_t gba_save_state(gba_core* c, uint8_t* out, size_t cap) {
 
 GBA_API int gba_load_state(gba_core* c, const uint8_t* data, size_t len) {
 	size_t base = c ? c->core->stateSize(c->core) : 0;
-	if (!c || !c->romLoaded || !data || (len != base && len != base + GRP_TRAILER)) {
+	if (!c || !c->romLoaded || !data || (len != base && !(len == base + GRP_TRAILER && c->platform == GBA_PLATFORM_GBA))) {
 		return -1;
 	}
 	bool trailer = len == base + GRP_TRAILER && grpTrailerValid(data + base);
@@ -1107,7 +1290,9 @@ GBA_API int gba_load_state(gba_core* c, const uint8_t* data, size_t len) {
 	}
 	/* in-flight link transfers are not part of a state: drop them */
 	c->frameActive = false;
-	linkReset(&c->link);
+	if (c->platform == GBA_PLATFORM_GBA) {
+		linkReset(&c->link);
+	}
 	if (c->rtcVirtual) {
 		/* the state carries its own frame counter; keep the virtual clock where it was instead of jumping */
 		c->core->rtc.value += clockMs - rtcFakeMs(c->core);
@@ -1118,7 +1303,7 @@ GBA_API int gba_load_state(gba_core* c, const uint8_t* data, size_t len) {
 /* ---- link API ---- */
 
 GBA_API void gba_link_configure(gba_core* c, int player_index, int player_count) {
-	if (!c || c->group) {
+	if (!c || c->group || c->platform != GBA_PLATFORM_GBA) {
 		return;
 	}
 	struct gba_link* L = &c->link;
@@ -1151,7 +1336,7 @@ GBA_API void gba_link_configure(gba_core* c, int player_index, int player_count)
 }
 
 GBA_API size_t gba_link_poll_outgoing(gba_core* c, uint8_t* out, size_t cap) {
-	if (!c || !out) {
+	if (!c || !out || c->platform != GBA_PLATFORM_GBA) {
 		return 0;
 	}
 	struct gba_link* L = &c->link;
@@ -1169,7 +1354,7 @@ GBA_API size_t gba_link_poll_outgoing(gba_core* c, uint8_t* out, size_t cap) {
 }
 
 GBA_API void gba_link_deliver(gba_core* c, int from, const uint8_t* d, size_t len) {
-	if (!c || !d || len < 4 || from < 0 || from > 3) {
+	if (!c || !d || len < 4 || from < 0 || from > 3 || c->platform != GBA_PLATFORM_GBA) {
 		return;
 	}
 	struct gba_link* L = &c->link;
@@ -1500,7 +1685,7 @@ static void grpAfterLoad(gba_core* c, const uint8_t* trailer) {
 /* ---- joining / leaving ---- */
 
 GBA_API int gba_group_add(gba_group* g, gba_core* c) {
-	if (!g || !c || !c->romLoaded || c->group || g->dissolved || g->added >= g->expected) {
+	if (!g || !c || !c->romLoaded || c->platform != GBA_PLATFORM_GBA || c->group || g->dissolved || g->added >= g->expected) {
 		return -1;
 	}
 	gba_link_configure(c, 0, 1); /* the classic cable is off while the core is in a group */
@@ -1681,11 +1866,23 @@ GBA_API long gba_group_stalls(gba_group* g) {
 
 /* ---- virtual RTC ---- */
 
+/* Game Boy: the cartridge remembers the UNIX time of its last latch (taken at ROM load from the then-current clock);
+ * keep it in step when the clock source changes so no phantom time passes. A saved clock loaded afterwards replaces it. */
+static void gbRtcShift(gba_core* c, int64_t before) {
+	if (c->gb) {
+		struct mRTCSource* r = c->gb->memory.rtc;
+		if (r) {
+			c->gb->memory.rtcLastLatch += (time_t) ((int64_t) r->unixTime(r) - before);
+		}
+	}
+}
+
 GBA_API int gba_set_rtc(gba_core* c, int64_t epoch_seconds, int mode) {
 	if (!c) {
 		return -1;
 	}
 	struct mRTCGenericSource* rtc = &c->core->rtc;
+	int64_t before = c->gb ? gba_priv_rtc_unix(c) : 0;
 	if (mode == GBA_RTC_VIRTUAL) {
 		if (!c->rtcVirtual) {
 			tzAcquire();
@@ -1694,6 +1891,7 @@ GBA_API int gba_set_rtc(gba_core* c, int64_t epoch_seconds, int mode) {
 		rtc->override = RTC_FAKE_EPOCH;
 		rtc->value = 0;
 		rtc->value = epoch_seconds * 1000LL - rtcFakeMs(c->core);
+		gbRtcShift(c, before);
 		return 0;
 	}
 	if (mode == GBA_RTC_WALL) {
@@ -1703,6 +1901,7 @@ GBA_API int gba_set_rtc(gba_core* c, int64_t epoch_seconds, int mode) {
 			rtc->value = 0;
 			tzRelease();
 			rtcRebaseOffset(c);
+			gbRtcShift(c, before);
 		}
 		return 0;
 	}
@@ -1715,9 +1914,12 @@ uint32_t gba_priv_read32(gba_core* c, uint32_t addr) { return c->core->busRead32
 uint16_t gba_priv_read16(gba_core* c, uint32_t addr) { return (uint16_t) c->core->busRead16(c->core, addr); }
 void gba_priv_write32(gba_core* c, uint32_t addr, uint32_t v) { c->core->busWrite32(c->core, addr, v); }
 int64_t gba_priv_rtc_unix(gba_core* c) {
-	struct mRTCSource* r = c->gba->rtcSource;
+	struct mRTCSource* r = c->gba ? c->gba->rtcSource : c->gb->memory.rtc;
 	return r ? (int64_t) r->unixTime(r) : 0;
 }
 int gba_priv_link_waiting(gba_core* c) {
+	if (c->platform != GBA_PLATFORM_GBA) {
+		return 0;
+	}
 	return c->link.mstate == M_WAIT || c->link.cstate == C_BUSY;
 }

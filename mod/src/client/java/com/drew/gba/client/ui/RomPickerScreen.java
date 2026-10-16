@@ -13,6 +13,7 @@ import java.util.List;
 public final class RomPickerScreen extends Screen {
 	private int perPage = 7;
 	private List<RomLibrary.Rom> roms = List.of();
+	private List<RomLibrary.Rejected> skipped = List.of();
 	private int page;
 
 	public RomPickerScreen() {
@@ -22,7 +23,8 @@ public final class RomPickerScreen extends Screen {
 	@Override
 	protected void init() {
 		roms = RomLibrary.scan();
-		perPage = Math.max(2, Math.min(7, (height - 40 - 78) / 24));
+		skipped = RomLibrary.lastRejected();
+		perPage = Math.max(2, Math.min(7, (height - 40 - 78 - (skipped.isEmpty() ? 0 : 36)) / 24));
 		rebuild();
 	}
 
@@ -37,8 +39,14 @@ public final class RomPickerScreen extends Screen {
 			int idx = page * perPage + i;
 			if (idx >= roms.size()) break;
 			RomLibrary.Rom r = roms.get(idx);
-			String label = r.name() + (r.code().isEmpty() ? "" : "  [" + r.code() + "]") + "  #" + com.drew.gba.client.GbaLinkClient.romId(r.sha1());
-			addRenderableWidget(Button.builder(Component.literal(label), b -> burn(r)).bounds(x, y + i * 24, w, 20).build());
+			String label = r.name() + "  [" + r.tag() + "]" + (r.code().isEmpty() ? "" : "  " + r.code()) + "  #" + com.drew.gba.client.GbaLinkClient.romId(r.sha1());
+			if (!r.warning().isEmpty()) label = r.name() + "  [" + r.tag() + "]  (incomplete file!)  #" + com.drew.gba.client.GbaLinkClient.romId(r.sha1());
+			Button rb = addRenderableWidget(Button.builder(Component.literal(label), b -> burn(r)).bounds(x, y + i * 24, w, 20).build());
+			if (!r.warning().isEmpty()) rb.setTooltip(net.minecraft.client.gui.components.Tooltip.create(Component.literal(r.warning())));
+			if (r.gameBoy() && !GbaLinkClient.gameBoySupported()) {
+				rb.active = false; // the emulator library is older than the mod (swapped files): cannot play Game Boy games
+				rb.setMessage(Component.literal(r.name() + "  [" + r.tag() + "]  needs a mod update"));
+			}
 		}
 		int by = y + perPage * 24 + 6;
 		Button prev = addRenderableWidget(Button.builder(Component.literal("<"), b -> { page--; rebuild(); })
@@ -64,10 +72,27 @@ public final class RomPickerScreen extends Screen {
 		g.centeredText(font, title, width / 2, 14, 0xFFFFFFFF);
 		if (roms.isEmpty()) {
 			g.centeredText(font, "No games found.", width / 2, 50, 0xFFFFAAAA);
-			g.centeredText(font, "Put .gba files in .minecraft/gbalink/roms/ and reopen.", width / 2, 64, 0xFFCCCCCC);
+			g.centeredText(font, "Put .gba, .gb or .gbc files in .minecraft/gbalink/roms/ and reopen.", width / 2, 64, 0xFFCCCCCC);
 			g.centeredText(font, "Click \"Open ROMs folder\" below to find it.", width / 2, 78, 0xFFCCCCCC);
 		} else {
 			g.centeredText(font, "Hold a Blank Game Pak, then pick a game.", width / 2, 26, 0xFFAAAAAA);
+		}
+		java.util.List<String> warns = new java.util.ArrayList<>();
+		for (RomLibrary.Rom r : roms) if (!r.warning().isEmpty()) warns.add(r.name() + ": " + r.warning());
+		if (!warns.isEmpty()) { // ROMs that are listed but look broken (a cut-off dump)
+			String t = warns.get(0);
+			if (font.width(t) > width - 20) t = font.plainSubstrByWidth(t, width - 30) + "...";
+			g.centeredText(font, t, width / 2, height - 12, 0xFFFFCC66);
+		}
+		if (!skipped.isEmpty()) { // files that are not valid ROMs, with the reason (up to three lines)
+			int w = Math.min(300, width - 20);
+			int ly = 40 + perPage * 24 + 6 + 24 + 22;
+			g.centeredText(font, skipped.size() + (skipped.size() == 1 ? " file was skipped:" : " files were skipped:"), width / 2, ly, 0xFFFFAA88);
+			for (int i = 0; i < Math.min(2, skipped.size()); i++) {
+				String t = skipped.get(i).file() + " - " + skipped.get(i).reason();
+				if (font.width(t) > w + 40) t = font.plainSubstrByWidth(t, w + 30) + "...";
+				g.centeredText(font, t, width / 2, ly + 11 + i * 10, 0xFFCC9977);
+			}
 		}
 	}
 

@@ -13,7 +13,11 @@ import java.util.zip.CRC32;
  * through and once with a snapshot reload (fresh cores) at frame 1500. Prints one line per check; every platform must print
  * exactly the same text.
  *
- * usage: NetplayHashCheck &lt;gameDir with gbalink/natives/&lt;platform&gt;/lib&gt; &lt;rom.gba&gt; [outFile]
+ * With a fourth argument (a directory holding gb_dmg.gb and gb_cgb.gbc, made by native/tests/make_gb_rom.py) it also runs the
+ * Game Boy / Game Boy Color determinism check: one core per ROM, scripted keys, virtual RTC, 1500 frames, CRC32 of the complete
+ * save state and the framebuffer at frames 100, 1000 and 1500 (the same numbers native/tests/test_determinism_gb.c pins).
+ *
+ * usage: NetplayHashCheck &lt;gameDir with gbalink/natives/&lt;platform&gt;/lib&gt; &lt;rom.gba&gt; [outFile [gbRomDir]]
  */
 public final class NetplayHashCheck {
 	static final long EPOCH = 1_760_000_000L;
@@ -78,6 +82,42 @@ public final class NetplayHashCheck {
 		return out.toString();
 	}
 
+	/** Same pseudo random key script as test_determinism_gb.c (Game Boy keys are the low 8 bits). */
+	static int gbScript(long frame) {
+		long block = frame / 16;
+		long h = (block + 1) * 0x9E3779B97F4A7C15L ^ (42L * 31 + 7) * 0xC2B2AE3D27D4EB4FL;
+		h ^= h >>> 29;
+		h *= 0xBF58476D1CE4E5B9L;
+		h ^= h >>> 32;
+		return (int) (h & 0xFFL);
+	}
+
+	static String runGameBoy(GbaNative n, Path rom) {
+		StringBuilder out = new StringBuilder();
+		try (GbaCore c = new GbaCore(n)) {
+			if (c.loadRom(rom) < 0 || !c.isGameBoy()) throw new IllegalStateException("not a Game Boy ROM: " + rom);
+			if (!c.setRtc(EPOCH, GbaNative.RTC_VIRTUAL)) throw new IllegalStateException("rtc");
+			short[] pcm = new short[4096];
+			byte[] fb = new byte[240 * 160 * 4];
+			int next = 0;
+			for (int f = 0; f < 1500; f++) {
+				c.setKeys(gbScript(f));
+				if (c.runFrame() != GbaNative.RUN_FRAME_DONE) throw new IllegalStateException("core error");
+				while (c.readAudio(pcm, 2048) > 0) { }
+				if (next < 3 && f + 1 == new int[] {100, 1000, 1500}[next]) {
+					CRC32 crc = new CRC32();
+					crc.update(c.saveState());
+					c.copyFramebuffer(fb);
+					crc.update(fb, 0, c.frameWidth() * c.frameHeight() * 4);
+					out.append("gb ").append(rom.getFileName()).append(" f=").append(f + 1).append(" all=")
+						.append(String.format("%08x", crc.getValue())).append('\n');
+					next++;
+				}
+			}
+		}
+		return out.toString();
+	}
+
 	public static void main(String[] a) throws Exception {
 		Path gameDir = Path.of(a[0]);
 		GbaNative n = GbaNative.get(gameDir);
@@ -88,6 +128,12 @@ public final class NetplayHashCheck {
 		sb.append("native api ").append(n.supportsNetplay() ? "3" : "1").append('\n');
 		sb.append(run(n, rom, 2));
 		sb.append(run(n, rom, 3));
+		if (a.length > 3) {
+			if (!n.supportsGameBoy()) throw new IllegalStateException("native library without Game Boy support (API 4)");
+			sb.append("gb api ").append(n.apiVersion()).append('\n');
+			sb.append(runGameBoy(n, Path.of(a[3], "gb_dmg.gb")));
+			sb.append(runGameBoy(n, Path.of(a[3], "gb_cgb.gbc")));
+		}
 		if (a.length > 2) Files.writeString(Path.of(a[2]), sb.toString());
 		System.out.print(sb);
 	}

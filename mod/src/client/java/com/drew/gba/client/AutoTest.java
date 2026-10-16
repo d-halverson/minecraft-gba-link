@@ -72,7 +72,7 @@ public final class AutoTest {
 		this.dir = mc.gameDirectory.toPath().resolve("autotest");
 		String sp = System.getProperty("gbalink.autotest.sync");
 		this.sync = sp == null ? dir.resolve("sync") : Path.of(sp);
-		this.romName = System.getProperty("gbalink.autotest.rom", mode.startsWith("ui") ? "tone.gba" : mode.startsWith("crt") && !mode.equals("crtmodel") ? "shades.gba" : mode.equals("qol") ? "counter.gba" : mode.equals("solo") ? "sram.gba" : mode.startsWith("np") || mode.startsWith("nc") || mode.startsWith("lv") ? "link_pokesim.gba" : "link_n32_" + (mode.equals("A") ? "master" : "slave") + ".gba");
+		this.romName = System.getProperty("gbalink.autotest.rom", mode.startsWith("promo") ? "Pokemon Emerald.gba" : mode.equals("gblinkB") ? "counter.gba" : mode.equals("gbreal") ? "Pokemon Red.gb" : mode.startsWith("gb") ? "gb_dmg.gb" : mode.startsWith("ui") ? "tone.gba" : mode.startsWith("crt") && !mode.equals("crtmodel") ? "shades.gba" : mode.equals("qol") ? "counter.gba" : mode.equals("solo") ? "sram.gba" : mode.startsWith("np") || mode.startsWith("nc") || mode.startsWith("lv") ? "link_pokesim.gba" : "link_n32_" + (mode.equals("A") ? "master" : "slave") + ".gba");
 	}
 
 	public static void start() {
@@ -174,10 +174,24 @@ public final class AutoTest {
 			done.get(15, TimeUnit.SECONDS);
 			log("screenshot screenshots/" + name + ".png");
 			copyEvidence(mc.gameDirectory.toPath().resolve("screenshots").resolve(name + ".png"),
-				name.startsWith("crt_") || name.startsWith("v043_") ? name + ".png" : mc.getUser().getName() + "_" + romName.replace(".gba", "") + "_" + name + ".png");
+				gbRom() ? gbEvidenceName(name)
+				: name.startsWith("crt_") || name.startsWith("v043_") ? name + ".png" : mc.getUser().getName() + "_" + romName.replace(".gba", "") + "_" + name + ".png");
 		} catch (Exception e) {
 			fail("screenshot " + name + ": " + e);
 		}
+	}
+
+	/** Game Boy ROMs (v0.5.0 scenarios): evidence is named gb_<rom>_<shot>.png so it never mixes with the GBA evidence. */
+	private boolean gbRom() { return romName.endsWith(".gb") || romName.endsWith(".gbc"); }
+
+	private String romBase() {
+		int d = romName.lastIndexOf('.');
+		return d > 0 ? romName.substring(0, d) : romName;
+	}
+
+	private String gbEvidenceName(String name) {
+		String base = romBase().startsWith("gb_") ? romBase() : "gb_" + romBase();
+		return base + "_" + (name.startsWith("gb_") ? name.substring(3) : name) + ".png";
 	}
 
 	private void copyEvidence(Path src, String dstName) {
@@ -195,11 +209,16 @@ public final class AutoTest {
 		EmulatorSession s = GbaLinkClient.currentSession();
 		if (s == null) fail("no session for framebuffer " + name);
 		byte[] rgba = new byte[240 * 160 * 4];
-		s.frames.copyTo(rgba);
+		int fw, fh;
+		synchronized (s.frames) {
+			fw = s.frames.width();
+			fh = s.frames.height();
+			s.frames.copyTo(rgba);
+		}
 		try {
 			Files.createDirectories(dir);
-			Files.write(dir.resolve(name + ".png"), png(rgba, 240, 160));
-			copyEvidence(dir.resolve(name + ".png"), "fb_" + mode + "_" + romName.replace(".gba", "") + "_" + name + ".png");
+			Files.write(dir.resolve(name + ".png"), png(rgba, fw, fh));
+			copyEvidence(dir.resolve(name + ".png"), gbRom() ? gbEvidenceName("fb_" + name) : "fb_" + mode + "_" + romName.replace(".gba", "") + "_" + name + ".png");
 			int nonBlack = 0;
 			for (int i = 0; i < rgba.length; i += 4) if ((rgba[i] | rgba[i + 1] | rgba[i + 2]) != 0) nonBlack++;
 			log("framebuffer autotest/" + name + ".png seq=" + s.frames.seq() + " nonBlackPixels=" + nonBlack);
@@ -297,8 +316,9 @@ public final class AutoTest {
 		select(blank);
 		use(); // client UseItemCallback opens the picker
 		waitFor("burn screen", 5000, () -> mc.gui.screen() instanceof RomPickerScreen);
-		String label = romName.substring(0, romName.length() - 4);
+		String label = romBase();
 		sleep(1000); // let the window settle (a resize re-inits the screen and replaces its widgets)
+		if (gbRom() && (mode.equals("gb") || mode.equals("gbreal"))) shot("gb_0_burn_picker"); // v0.5.0: the list with its system tags
 		Boolean clicked = null;
 		for (int page = 0; page < 8 && clicked == null; page++) { // the picker lists 6 ROMs per page
 			clicked = main(() -> {
@@ -404,6 +424,10 @@ public final class AutoTest {
 			else if (mode.equals("uiA") || mode.equals("uiB")) ui042();
 			else if (mode.equals("qol")) qol();
 			else if (mode.equals("solo")) solo();
+			else if (mode.equals("gb")) gameBoySolo();
+			else if (mode.equals("gbreal")) gameBoyReal();
+			else if (mode.equals("gblinkA") || mode.equals("gblinkB")) gameBoyLink();
+			else if (mode.startsWith("promo")) promo();
 			else if (mode.startsWith("np") || mode.startsWith("nc") || mode.startsWith("lv")) netplayScenario();
 			else link();
 			log("SCENARIO COMPLETE: " + mode);
@@ -1027,6 +1051,374 @@ public final class AutoTest {
 		waitFor("pak ejected to off hand", 5000, () -> GbaItems.is(mc.player.getItemInHand(InteractionHand.OFF_HAND), GbaItems.PAK)
 			&& GbaItems.insertedPak(mc.player.getInventory().getItem(gbaSlot)) == null);
 		check(true, "pak ejected back to the off hand");
+	}
+
+	// ---- v0.5.0: Game Boy / Game Boy Color ----
+
+	/** The three counter digits the test ROM keeps in cartridge RAM (A004-A006), read from the core's live save. */
+	private int gbCounter() {
+		byte[] sav = GbaLinkClient.currentSession().debugSave().orTimeout(5, TimeUnit.SECONDS).join();
+		return sav == null || sav.length < 7 ? -1 : sav[4] * 100 + sav[5] * 10 + sav[6];
+	}
+
+	private void gbPressA(GbaScreen sc, int times) {
+		for (int i = 0; i < times; i++) {
+			pressKey(sc, InputConstants.KEY_X, 88, 130); // A
+			sleep(130);
+		}
+	}
+
+	/** Burn a Game Boy / Game Boy Color ROM, play it on the GBA screen: picture, keys, saves, suspend, export, import. */
+	private void gameBoySolo() {
+		boolean color = romName.endsWith(".gbc");
+		String system = color ? "gbc" : "gb";
+		int saveLen = romName.equals("gb_dmg.gb") ? 8192 + 48 : 8192;
+		giveAndWait(GbaItems.GBA);
+		giveAndWait(GbaItems.BLANK_PAK);
+		burn();
+		PakData pd = insert();
+		check(system.equals(pd.system()), "the pak records its system: " + pd.system());
+		check(pd.code().length() == 4 && !pd.title().isEmpty(), "title '" + pd.title() + "' and code '" + pd.code() + "' come from the ROM header");
+		Path suspend = gbalinkDir().resolve("suspend").resolve(pd.pakId() + ".state");
+		Path serverSave = savePath(pd);
+		Path mirror = gbalinkDir().resolve("saves").resolve(pd.pakId() + ".sav");
+		check(serverSave != null, "world dir given");
+
+		openGba();
+		EmulatorSession s1 = GbaLinkClient.currentSession();
+		check(s1.isGameBoy() && s1.system().equals(system), "session knows it plays a " + system + " game");
+		check(s1.frames.width() == 160 && s1.frames.height() == 144, "the core produces a 160x144 picture");
+		sleep(2500);
+		shot("gb_1_boot");
+		framePng("1");
+		GbaScreen sc = gbaScreen();
+		check(gbCounter() == 0, "fresh cartridge: counter 0");
+		gbPressA(sc, 5);
+		sleep(300);
+		check(gbCounter() == 5, "five A presses through the real key handler: cartridge counter " + gbCounter());
+		// hold Right + Up + A + Start: the boxes under the counter show the pad
+		main(() -> sc.keyPressed(new KeyEvent(InputConstants.KEY_RIGHT, 262, 0)));
+		main(() -> sc.keyPressed(new KeyEvent(InputConstants.KEY_UP, 265, 0)));
+		main(() -> sc.keyPressed(new KeyEvent(InputConstants.KEY_X, 88, 0)));
+		main(() -> sc.keyPressed(new KeyEvent(InputConstants.KEY_RETURN, 257, 0)));
+		sleep(600);
+		shot("gb_2_keys_held");
+		framePng("2_keys");
+		main(() -> sc.keyReleased(new KeyEvent(InputConstants.KEY_RIGHT, 262, 0)));
+		main(() -> sc.keyReleased(new KeyEvent(InputConstants.KEY_UP, 265, 0)));
+		main(() -> sc.keyReleased(new KeyEvent(InputConstants.KEY_X, 88, 0)));
+		main(() -> sc.keyReleased(new KeyEvent(InputConstants.KEY_RETURN, 257, 0)));
+		sleep(300);
+		// save states (client local)
+		pressKey(sc, InputConstants.KEY_F5, 294, 100);
+		sleep(600);
+		check(main(() -> GbaLinkClient.currentSession().toast()).contains("State saved"), "F5 saves a state");
+		gbPressA(sc, 2);
+		pressKey(sc, InputConstants.KEY_F8, 297, 100);
+		sleep(600);
+		check(main(() -> GbaLinkClient.currentSession().toast()).contains("State loaded"), "F8 loads it");
+		sleep(300);
+		// (a state holds RAM and registers but not the battery RAM, so the cartridge keeps its latest counter)
+		final int exp = gbCounter();
+		check(exp == 8, "the cartridge counter is 8 after 5 + 1 (held A) + 2 presses: " + exp);
+		// export
+		clickGbaButton("Export .sav");
+		sleep(800);
+		String t = main(() -> GbaLinkClient.currentSession().toast());
+		check(t.contains("Exported"), "export toast ('" + t + "')");
+		shot("gb_3_export_toast");
+		try (var st = Files.list(gbalinkDir().resolve("exports"))) {
+			Path f = st.filter(p -> p.getFileName().toString().startsWith(romBase() + "-") && p.toString().endsWith(".sav")).sorted().reduce((a, b) -> b).get();
+			byte[] ex = Files.readAllBytes(f);
+			check(ex.length == saveLen, "exported save is " + ex.length + " bytes (want " + saveLen + ") " + f.getFileName());
+			check(ex[0] == 'G' && ex[1] == 'B' && ex[2] == 'S' && ex[6] == exp, "exported save holds the cartridge RAM (counter " + exp + ")");
+		} catch (IOException | java.util.NoSuchElementException e) { fail("exports: " + e); }
+
+		// suspend (Esc): the suspend file records the system; the server holds the uploaded save
+		closeGba();
+		waitFor("suspend file", 5000, () -> Files.isRegularFile(suspend));
+		var sf = com.drew.gba.save.SuspendFile.decode(readQuiet(suspend));
+		check(sf != null && sf.system().equals(system), "suspend file records the platform (" + (sf == null ? "?" : sf.system()) + ")");
+		check(Files.isRegularFile(serverSave), "server holds the uploaded save");
+		byte[] onServer = readQuiet(serverSave);
+		check(onServer.length == saveLen && onServer[6] == exp, "server save: " + onServer.length + " bytes, counter " + onServer[6]);
+		check(Arrays.equals(readQuiet(mirror), onServer), "local mirror equals the server save");
+		openGba();
+		EmulatorSession s2 = GbaLinkClient.currentSession();
+		check(s2.resumed && s2.toast().contains("Resumed"), "reopen resumed the suspend state");
+		sleep(800);
+		check(gbCounter() == exp, "counter after resume " + gbCounter());
+		shot("gb_4_resumed");
+
+		// power off, then cold boot: the battery save restores the counter
+		clickPowerSwitch();
+		check(!Files.exists(suspend), "power off deleted the suspend state");
+		openGba();
+		check(!GbaLinkClient.currentSession().resumed, "cold boot after power off");
+		sleep(1500);
+		check(gbCounter() == exp, "battery save survived the power cycle: counter " + gbCounter());
+		shot("gb_5_cold_boot_save");
+
+		// import: a Game Boy save (counter 9) and a wrong-sized file
+		byte[] imp = new byte[8192];
+		Arrays.fill(imp, (byte) 0xFF);
+		imp[0] = 'G'; imp[1] = 'B'; imp[2] = 'S'; imp[3] = '1'; imp[4] = 0; imp[5] = 0; imp[6] = 9;
+		try {
+			Files.createDirectories(gbalinkDir().resolve("imports"));
+			Files.write(gbalinkDir().resolve("imports").resolve("gb counter 9.sav"), imp);
+			Files.write(gbalinkDir().resolve("imports").resolve("gb garbage.sav"), new byte[1234]);
+		} catch (IOException e) { fail("write import files " + e); }
+		byte[] before = readQuiet(serverSave);
+		clickGbaButton("Import .sav");
+		waitFor("import picker", 5000, () -> mc.gui.screen() instanceof com.drew.gba.client.ui.SavePickerScreen);
+		sleep(800);
+		shot("gb_6_import_picker");
+		Boolean garbageActive = main(() -> {
+			for (var c : mc.gui.screen().children()) if (c instanceof Button b && b.getMessage().getString().startsWith("gb garbage.sav")) return b.active;
+			return null;
+		});
+		check(Boolean.FALSE.equals(garbageActive), "a wrong-sized .sav is listed but cannot be picked");
+		clickWidget("gb counter 9.sav");
+		waitFor("confirm screen", 5000, () -> mc.gui.screen() instanceof com.drew.gba.client.ui.ImportConfirmScreen);
+		clickWidget("Import");
+		waitFor("back on the GBA screen", 5000, () -> mc.gui.screen() instanceof GbaScreen);
+		EmulatorSession pre = GbaLinkClient.currentSession();
+		waitFor("imported toast", 8000, () -> pre.toast().startsWith("Imported"));
+		sleep(1500);
+		check(Arrays.equals(readQuiet(serverSave), imp), "server stores exactly the imported Game Boy save");
+		check(Arrays.equals(readQuiet(serverSave.resolveSibling(serverSave.getFileName() + ".bak1")), before), "server kept the old save as .bak1");
+		check(gbCounter() == 9, "the cartridge boots with the imported save: counter " + gbCounter());
+		shot("gb_7_import_done");
+		closeGba();
+		// eject
+		int gbaSlot = slotOf(GbaItems.GBA);
+		select(gbaSlot);
+		sneak(true);
+		use();
+		sneak(false);
+		waitFor("pak ejected to off hand", 5000, () -> GbaItems.is(mc.player.getItemInHand(InteractionHand.OFF_HAND), GbaItems.PAK));
+		PakData back = main(() -> GbaItems.pakOf(mc.player.getItemInHand(InteractionHand.OFF_HAND)));
+		check(back != null && back.system().equals(system), "the ejected pak keeps its system (" + (back == null ? "?" : back.system()) + ")");
+	}
+
+	/** A real cartridge dump (-Dgbalink.autotest.rom=...): burn, play a few seconds on the GBA screen, press Start, screenshots. */
+	private void gameBoyReal() {
+		giveAndWait(GbaItems.GBA);
+		giveAndWait(GbaItems.BLANK_PAK);
+		burn();
+		PakData pd = insert();
+		log("real ROM pak: system=" + pd.system() + " title=" + pd.title() + " code=" + pd.code());
+		openGba();
+		EmulatorSession s = GbaLinkClient.currentSession();
+		log("toast at start: '" + s.toast() + "' size " + s.frames.width() + "x" + s.frames.height());
+		sleep(9000);
+		shot("gb_real_1_title");
+		GbaScreen sc = gbaScreen();
+		pressKey(sc, InputConstants.KEY_RETURN, 257, 150);
+		sleep(2500);
+		shot("gb_real_2_after_start");
+		check(s.frames.seq() > 300 && s.error() == null, "keeps emulating without errors (" + s.frames.seq() + " frames)");
+		closeGba();
+	}
+
+	/** A (Game Boy pak) and B (GBA pak) are cabled: A says link cables are unsupported for Game Boy games and acts unlinked; B is not disturbed. */
+	private void gameBoyLink() {
+		boolean a = mode.equals("gblinkA");
+		String other = a ? "gblinkB" : "gblinkA";
+		giveAndWait(GbaItems.GBA);
+		giveAndWait(GbaItems.BLANK_PAK);
+		if (a) giveAndWait(GbaItems.CABLE);
+		burn();
+		insert();
+		signal(mode + ".ready");
+		awaitSignal(other + ".ready", 180000);
+		if (a) {
+			command("tp @s TestB");
+			sleep(1500);
+			select(slotOf(GbaItems.CABLE));
+			AbstractClientPlayer target = main(() -> {
+				for (AbstractClientPlayer p : mc.level.players()) if (p != mc.player && p.getGameProfile().name().equals("TestB")) return p;
+				return null;
+			});
+			if (target == null) fail("TestB not visible to TestA");
+			main(() -> mc.gameMode.interact(mc.player, target, new EntityHitResult(target), InteractionHand.MAIN_HAND));
+			log("used link cable on TestB");
+			sleep(800);
+			signal("gblinkA.cabled");
+		}
+		awaitSignal("gblinkA.cabled", 60000);
+		waitFor("cable state", 10000, () -> ClientCable.linked());
+		sleep(500);
+		openGba();
+		EmulatorSession s = GbaLinkClient.currentSession();
+		signal(mode + ".open");
+		awaitSignal(other + ".open", 60000);
+		sleep(4000);
+		log("status: " + s.linkStatus() + " | hud: " + main(ClientCable::stateLine) + " | linkCount " + s.linkCount());
+		check(s.linkCount() < 2, "no effective link for anyone: only one linkable game is open");
+		check(!s.linkTimedOut(), "no link errors");
+		if (a) {
+			check(s.isGameBoy(), "A plays a Game Boy game");
+			check(s.linkStatus().equals(EmulatorSession.GB_LINK_UNSUPPORTED), "A's status line: '" + s.linkStatus() + "'");
+			check(main(ClientCable::stateLine).equals(EmulatorSession.GB_LINK_UNSUPPORTED), "A's cable HUD says why: '" + main(ClientCable::stateLine) + "'");
+		} else {
+			check(!s.isGameBoy(), "B plays a GBA game");
+			check(!s.linkStatus().contains("not responding"), "B has no communication errors: '" + s.linkStatus() + "'");
+		}
+		shot("gb_link_" + (a ? "A" : "B"));
+		sleep(2000);
+		signal(mode + ".shot");
+		awaitSignal(other + ".shot", 60000);
+		check(s.frames.seq() > 100, "still emulating");
+		closeGba();
+	}
+
+	// ------------------------------------------------------------------ README screenshots: a command-file driven session
+
+	/**
+	 * Dev only (modes promoA / promoB). Sets up a console (GBA, or a CRT TV with -Dgbalink.crt=1) with the configured ROM, then
+	 * executes commands appended to {@code autotest/cmd.txt} (the file is consumed whenever it appears) so a person (or Claude) can
+	 * look at screenshots and decide the next key presses. Commands: see {@link #promoCmd}.
+	 */
+	private void promo() {
+		boolean crt = Boolean.getBoolean("gbalink.crt");
+		if (crt) giveAndWait(GbaItems.CRT); else giveAndWait(GbaItems.GBA);
+		giveAndWait(GbaItems.BLANK_PAK);
+		if (mode.equals("promoA")) giveAndWait(GbaItems.CABLE);
+		burn();
+		double[] tv = new double[3];
+		if (crt) { placeCrtAndInsert(tv); promoTv = tv; } else insert();
+		log("promo ready; waiting for commands in " + dir.resolve("cmd.txt"));
+		Path cmd = dir.resolve("cmd.txt");
+		while (true) {
+			if (Files.exists(cmd)) {
+				List<String> lines;
+				try {
+					lines = Files.readAllLines(cmd);
+					Files.delete(cmd);
+				} catch (IOException e) { sleep(200); continue; }
+				for (String l : lines) {
+					l = l.trim();
+					if (l.isEmpty() || l.startsWith("#")) continue;
+					log("CMD> " + l);
+					try {
+						if (l.equals("quit")) { log("CMD done (quit)"); return; }
+						promoCmd(l);
+					} catch (Fail f) {
+						log("CMD FAILED: " + f.getMessage());
+					} catch (RuntimeException e) {
+						log("CMD ERROR: " + e);
+					}
+				}
+				log("CMD done");
+			}
+			sleep(150);
+		}
+	}
+
+	private double[] promoTv;
+
+	private int promoKey(String n) {
+		ControlMap m = ControlMap.get();
+		return switch (n.toUpperCase(java.util.Locale.ROOT)) {
+			case "A" -> m.primary(ControlMap.Action.A);
+			case "B" -> m.primary(ControlMap.Action.B);
+			case "L" -> m.primary(ControlMap.Action.L);
+			case "R" -> m.primary(ControlMap.Action.R);
+			case "START" -> m.primary(ControlMap.Action.START);
+			case "SELECT" -> m.primary(ControlMap.Action.SELECT);
+			case "UP" -> m.primary(ControlMap.Action.UP);
+			case "DOWN" -> m.primary(ControlMap.Action.DOWN);
+			case "LEFT" -> m.primary(ControlMap.Action.LEFT);
+			case "RIGHT" -> m.primary(ControlMap.Action.RIGHT);
+			case "ESC" -> InputConstants.KEY_ESCAPE;
+			case "SAVESTATE" -> m.primary(ControlMap.Action.SAVE_STATE);
+			case "LOADSTATE" -> m.primary(ControlMap.Action.LOAD_STATE);
+			case "Q" -> 20;
+			case "W" -> 26;
+			case "K" -> 14;
+			default -> throw new Fail("unknown key " + n);
+		};
+	}
+
+	private void promoCmd(String l) {
+		String[] t = l.split("\\s+");
+		switch (t[0]) {
+			case "sleep" -> sleep(Long.parseLong(t[1]));
+			case "open" -> { if (promoTv != null) playCrt(promoTv); else openGba(); }
+			case "close" -> {
+				if (promoTv != null) { main(() -> { if (mc.gui.screen() != null) mc.gui.screen().onClose(); }); confirmLeave(); sleep(800); }
+				else closeGba();
+			}
+			case "size" -> setGuiSize(Integer.parseInt(t[1]), Integer.parseInt(t[2]), Integer.parseInt(t[3]));
+			case "shot" -> { clearClutter(); shot(t[1]); }
+			case "hidehud" -> hideGui(true);
+			case "frame" -> framePng(t[1]);
+			case "import" -> { // import <file in gbalink/imports or absolute path>
+				Path f = Path.of(t[1]);
+				byte[] d;
+				try { d = Files.readAllBytes(f); } catch (IOException e) { throw new Fail("read " + f); }
+				EmulatorSession s = GbaLinkClient.currentSession();
+				s.importSaveAsync(f.getFileName().toString(), d);
+			}
+			case "keys" -> { // keys UP:150*3 A START ...  (hold ms default 130, gap 170)
+				for (int i = 1; i < t.length; i++) {
+					String tok = t[i];
+					int n = 1;
+					long hold = 130;
+					if (tok.contains("*")) { n = Integer.parseInt(tok.substring(tok.indexOf('*') + 1)); tok = tok.substring(0, tok.indexOf('*')); }
+					if (tok.contains(":")) { hold = Long.parseLong(tok.substring(tok.indexOf(':') + 1)); tok = tok.substring(0, tok.indexOf(':')); }
+					if (tok.startsWith("w") && tok.length() > 1 && Character.isDigit(tok.charAt(1))) { sleep(Long.parseLong(tok.substring(1))); continue; }
+					int key = promoKey(tok);
+					for (int k = 0; k < n; k++) {
+						var sc = main(() -> mc.gui.screen());
+						main(() -> sc.keyPressed(new KeyEvent(key, 0, 0)));
+						sleep(hold);
+						main(() -> sc.keyReleased(new KeyEvent(key, 0, 0)));
+						sleep(170);
+					}
+				}
+			}
+			case "hold" -> { // hold KEY ms
+				int key = promoKey(t[1]);
+				var sc = main(() -> mc.gui.screen());
+				main(() -> sc.keyPressed(new KeyEvent(key, 0, 0)));
+				sleep(Long.parseLong(t[2]));
+				main(() -> sc.keyReleased(new KeyEvent(key, 0, 0)));
+			}
+			case "cable" -> { // A: link cable on TestB
+				command("tp @s TestB");
+				sleep(1500);
+				select(slotOf(GbaItems.CABLE));
+				AbstractClientPlayer target = main(() -> {
+					for (AbstractClientPlayer p : mc.level.players()) if (p != mc.player && p.getGameProfile().name().equals("TestB")) return p;
+					return null;
+				});
+				if (target == null) throw new Fail("TestB not visible");
+				main(() -> mc.gameMode.interact(mc.player, target, new EntityHitResult(target), InteractionHand.MAIN_HAND));
+				sleep(800);
+			}
+			case "controls" -> { // open the Controls screen through the real button
+				if (promoTv != null && !main(() -> ((CrtScreen) mc.gui.screen()).panelOpen())) main(() -> ((CrtScreen) mc.gui.screen()).setPanelOpen(true));
+				clickWidget("Controls");
+			}
+			case "ctlwait" -> main(() -> ((com.drew.gba.client.ui.ControlsScreen) mc.gui.screen()).debugWait(ControlMap.Action.valueOf(t[1])));
+			case "ctlbind" -> main(() -> ((com.drew.gba.client.ui.ControlsScreen) mc.gui.screen()).debugRebind(ControlMap.Action.valueOf(t[1]), promoKey(t[2])));
+			case "click" -> clickWidget(l.substring(6));
+			case "panel" -> main(() -> ((CrtScreen) mc.gui.screen()).setPanelOpen(Boolean.parseBoolean(t[1])));
+			case "esc" -> main(() -> { var sc = mc.gui.screen(); sc.keyPressed(new KeyEvent(InputConstants.KEY_ESCAPE, 256, 0)); });
+			case "tpspec" -> { // stand a few blocks behind the TV looking at it (spectator view)
+				tp(promoTv[0] + 1.0, promoTv[1], promoTv[2] - 3.4, 0f, 8f);
+				hideGui(true);
+			}
+			case "cmd" -> { command(l.substring(4)); sleep(800); }
+			case "gui" -> hideGui(!Boolean.parseBoolean(t[1]));
+			case "status" -> {
+				EmulatorSession s = GbaLinkClient.currentSession();
+				log("status: screen=" + main(() -> String.valueOf(mc.gui.screen())) + " link='" + (s == null ? "-" : s.linkStatus()) + "' stats='" + (s == null ? "-" : s.linkStatsLine()) + "' toast='" + (s == null ? "" : s.toast()) + "'");
+			}
+			default -> throw new Fail("unknown command " + t[0]);
+		}
 	}
 
 	// ---- QoL: folders, suspend / power switch, revision guard, export, import ----

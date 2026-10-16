@@ -168,7 +168,8 @@ public final class CrtServer {
 		StringBuilder pakNbt = new StringBuilder();
 		if (pak != null) {
 			pakNbt.append(",pak:{pakId:\"").append(pak.pakId()).append("\",sha1:\"").append(pak.sha1()).append("\",title:")
-				.append(quote(pak.title())).append(",code:").append(quote(pak.code())).append("}");
+				.append(quote(pak.title())).append(",code:").append(quote(pak.code()))
+				.append(pak.gameBoy() ? ",system:" + quote(pak.system()) : "").append("}");
 		}
 		String disp = String.format(java.util.Locale.ROOT,
 			"summon minecraft:item_display %.3f %.3f %.3f {Tags:[%s],Rotation:[%.1ff,0f],item_display:\"fixed\",billboard:\"fixed\",width:4.0f,height:3.0f,"
@@ -244,13 +245,17 @@ public final class CrtServer {
 				: "Your GBA Link mod is out of date - update the mod to play");
 			return;
 		}
+		if (st.pak().gameBoy() && !GbaServer.canGameBoy(p.getUUID())) {
+			GbaServer.hint(p, "Your GBA Link mod can't play Game Boy games - update the mod to play");
+			return;
+		}
 		Live existing = live.get(st.crtId());
 		if (existing != null && !existing.player.equals(p.getUUID())) { GbaServer.hint(p, "Someone is playing"); return; }
 		if (e.distanceToSqr(p) > PLAY_RANGE * PLAY_RANGE) { GbaServer.hint(p, "Too far away"); return; }
 		endForPlayer(p.getUUID());
 		PakData pak = st.pak();
 		byte[] save = gba.store().read(pak.pakId());
-		gba.openSession(p, pak.pakId(), pak.sha1());
+		gba.openSession(p, pak.pakId(), pak.sha1(), pak.system());
 		Live l = new Live(st.crtId(), p, p.level().dimension(), e.getX(), e.getY(), e.getZ(), st.yaw());
 		live.put(l.crtId, l);
 		byPlayer.put(p.getUUID(), l.crtId);
