@@ -18,6 +18,19 @@ public final class ClientConfig {
 
 	private static volatile Path file;
 	private static volatile int gbaVolume = DEFAULT_GBA_VOLUME;
+	private static volatile EscMode escMode = EscMode.PAUSE;
+
+	/** What Esc does while playing on a CRT TV (0.5.1): open the pause menu and freeze the game ("Paused" on the TV), or open it and keep the game running. */
+	public enum EscMode {
+		PAUSE("pause", "Pause"), KEEP_RUNNING("keep", "Keep running");
+		public final String key, label;
+		EscMode(String key, String label) { this.key = key; this.label = label; }
+		public EscMode next() { return this == PAUSE ? KEEP_RUNNING : PAUSE; }
+		public static EscMode parse(String s) {
+			if (s != null) for (EscMode m : values()) if (m.key.equalsIgnoreCase(s.trim())) return m;
+			return PAUSE;
+		}
+	}
 
 	private ClientConfig() {}
 
@@ -25,6 +38,7 @@ public final class ClientConfig {
 	public static synchronized void init(Path configDir) {
 		file = configDir.resolve(FILE_NAME);
 		gbaVolume = DEFAULT_GBA_VOLUME;
+		escMode = EscMode.PAUSE;
 		if (!Files.isRegularFile(file)) return;
 		Properties p = new Properties();
 		try (InputStream in = Files.newInputStream(file)) {
@@ -33,6 +47,15 @@ public final class ClientConfig {
 			return;
 		}
 		gbaVolume = parsePercent(p.getProperty("gbaVolume"), DEFAULT_GBA_VOLUME);
+		escMode = EscMode.parse(p.getProperty("crtEscMode"));
+	}
+
+	public static EscMode escMode() {
+		return escMode;
+	}
+
+	public static void setEscMode(EscMode m) {
+		escMode = m == null ? EscMode.PAUSE : m;
 	}
 
 	public static int parsePercent(String s, int def) {
@@ -77,10 +100,11 @@ public final class ClientConfig {
 		if (f == null) return;
 		Properties p = new Properties();
 		p.setProperty("gbaVolume", Integer.toString(gbaVolume));
+		p.setProperty("crtEscMode", escMode.key);
 		try {
 			Files.createDirectories(f.getParent());
 			try (OutputStream out = Files.newOutputStream(f)) {
-				p.store(out, "gbalink client settings. gbaVolume: 0-100, the GBA / CRT audio volume (independent of Minecraft's master volume)");
+				p.store(out, "gbalink client settings. gbaVolume: 0-100, the GBA / CRT audio volume (independent of Minecraft's master volume). crtEscMode: pause | keep (what Esc does on a CRT TV)");
 			}
 		} catch (IOException ignored) {
 		}

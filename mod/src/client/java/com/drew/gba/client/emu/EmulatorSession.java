@@ -82,6 +82,8 @@ public final class EmulatorSession implements Runnable {
 	private volatile int held;
 	private final AtomicInteger latched = new AtomicInteger();
 	public volatile boolean turbo;
+	/** CRT pause menu with "Pause on Esc": the emulation stands still and the TV shows "PAUSED". Ignored (the game keeps running) while linked, so the partner never stalls. */
+	private volatile boolean paused;
 
 	private final ConcurrentLinkedQueue<Runnable> commands = new ConcurrentLinkedQueue<>();
 	private final LinkPump link;
@@ -191,6 +193,11 @@ public final class EmulatorSession implements Runnable {
 			f.done().countDown();
 		}
 	}
+
+	public void setPaused(boolean p) { paused = p; if (!p) frames.setPausedOverlay(false); }
+	public boolean isPausedByUser() { return paused; }
+
+	private boolean pauseEffective() { return paused && !netplayActive && !netplayExpected && link.count() < 2 && !isFinished(); }
 
 	public void resetAsync() { commands.add(() -> { core.reset(); toast("Reset"); }); }
 
@@ -482,6 +489,16 @@ public final class EmulatorSession implements Runnable {
 				next = System.nanoTime();
 				lastSave = lastSaveNanos;
 			}
+			if (pauseEffective()) { // CRT pause menu: freeze, keep the TV and the stream refreshed with the "PAUSED" overlay
+				frames.setPausedOverlay(true);
+				frames.touch();
+				com.drew.gba.client.crt.CrtStreamer ps = streamer;
+				if (ps != null) ps.offerFrame(frames);
+				LockSupport.parkNanos(33_000_000L);
+				next = System.nanoTime();
+				continue;
+			}
+			frames.setPausedOverlay(false);
 			core.setKeys(held | latched.getAndSet(0));
 			link.deliverIncoming();
 			if (!runOneFrame()) break;

@@ -10,6 +10,51 @@ public final class FrameBuffer {
 	private final byte[] data = new byte[GbaNative.WIDTH * GbaNative.HEIGHT * 4];
 	private volatile int seq;
 	private int w = GbaNative.WIDTH, h = GbaNative.HEIGHT;
+	private volatile boolean pausedOverlay;
+
+	/** A green "PAUSED" is drawn over the 240x160 canvas of {@link #copyLetterboxed} (the TV in the world and the spectators' stream) while set. */
+	public void setPausedOverlay(boolean on) {
+		if (pausedOverlay != on) {
+			pausedOverlay = on;
+			seq++; // consumers redraw
+		}
+	}
+
+	/** Emulator thread, while paused: the picture did not change but the overlay has to reach the TV / stream again. */
+	public void touch() { seq++; }
+
+	private static final String[][] FONT = {
+		{"1111.", "1...1", "1...1", "1111.", "1....", "1....", "1...."},        // P
+		{".111.", "1...1", "1...1", "11111", "1...1", "1...1", "1...1"},        // A
+		{"1...1", "1...1", "1...1", "1...1", "1...1", "1...1", ".111."},        // U
+		{".1111", "1....", "1....", ".111.", "....1", "....1", "1111."},        // S
+		{"11111", "1....", "1....", "1111.", "1....", "1....", "11111"},        // E
+		{"1111.", "1...1", "1...1", "1...1", "1...1", "1...1", "1111."},        // D
+	};
+
+	/** Draws "PAUSED" (green, 3x scale, on a dark plate) in the middle of a 240x160 RGBA canvas. */
+	public static void drawPaused(byte[] c) {
+		final int cw = GbaNative.WIDTH, ch = GbaNative.HEIGHT, sc = 3, gw = 5 * sc, gap = sc;
+		int[] order = {0, 1, 2, 3, 4, 5};
+		int textW = order.length * gw + (order.length - 1) * gap, textH = 7 * sc;
+		int x0 = (cw - textW) / 2, y0 = (ch - textH) / 2, pad = 6;
+		for (int y = y0 - pad; y < y0 + textH + pad; y++) {
+			for (int x = x0 - pad; x < x0 + textW + pad; x++) {
+				int i = (y * cw + x) * 4;
+				c[i] = (byte) ((c[i] & 0xFF) / 4); c[i + 1] = (byte) ((c[i + 1] & 0xFF) / 4); c[i + 2] = (byte) ((c[i + 2] & 0xFF) / 4);
+			}
+		}
+		for (int k = 0; k < order.length; k++) {
+			String[] g = FONT[order[k]];
+			for (int gy = 0; gy < 7; gy++) for (int gx = 0; gx < 5; gx++) {
+				if (g[gy].charAt(gx) != '1') continue;
+				for (int dy = 0; dy < sc; dy++) for (int dx = 0; dx < sc; dx++) {
+					int i = ((y0 + gy * sc + dy) * cw + x0 + k * (gw + gap) + gx * sc + dx) * 4;
+					c[i] = (byte) 0x3C; c[i + 1] = (byte) 0xE0; c[i + 2] = (byte) 0x5A; c[i + 3] = (byte) 255;
+				}
+			}
+		}
+	}
 
 	/** Emulator thread: fill via the callback (a GBA sized picture), then publish. */
 	public synchronized void publish(java.util.function.Consumer<byte[]> fill) {
@@ -48,6 +93,7 @@ public final class FrameBuffer {
 	 */
 	public synchronized void copyLetterboxed(byte[] dst) {
 		letterbox(data, w, h, dst);
+		if (pausedOverlay) drawPaused(dst);
 	}
 
 	/** Puts a {@code w} x {@code h} RGBA picture centred 1:1 on the 240x160 canvas {@code dst} (black borders, alpha 255). */

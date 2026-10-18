@@ -1,6 +1,16 @@
 # Changelog
 
-## 0.5.1
+## 0.5.2
+
+(0.5.1 was tagged but never published because of a CI test race; everything below ships as 0.5.2.)
+
+
+* **CRT: what Esc does is now a setting** (Options panel button "Esc: Pause" / "Esc: Keep running", saved in `config/gbalink-client.properties`
+  as `crtEscMode`). Esc opens the pause menu (the Options panel) and no game key reaches the game while it is open (held keys are released).
+  **Pause** (default) freezes the emulation and puts a green "PAUSED" over the picture on the TV, in the world and in the spectators' stream;
+  **Keep running** leaves the game, the sound and the stream running. Esc or the Leave button again leaves; O / the Options button resumes.
+  While linked Esc still goes straight to the "Leave anyway?" confirmation and the game always keeps running, so a partner never stalls.
+  (The GBA screen has no pause menu: Esc there closes and suspends, as before.)
 
 * **The Link Cable works for Game Boy and Game Boy Color games**, the same item and the same steps as for GBA (link to a nearby player,
   Unlink, "Linked to X" HUD, confirm before leaving a link): the games' own link menus work over the Minecraft server. Pokemon Red's

@@ -147,6 +147,8 @@ class GameBoyLinkTest {
 
 	private final List<Player> players = new ArrayList<>();
 	private ScheduledExecutorService sched;
+	/** Both players have their cable plugged (pump applied) before either runs a frame: a START sent to a partner that is still booting would be dropped by the relay (as the server does for an unlinked player) and the master would wait for it. */
+	private final java.util.concurrent.CountDownLatch bothPlugged = new java.util.concurrent.CountDownLatch(2);
 
 	@AfterEach
 	void stopPlayers() throws InterruptedException {
@@ -187,6 +189,8 @@ class GameBoyLinkTest {
 				p.bind(c);
 				p.apply(id, 2, List.of("a", "b"));
 				pump = p;
+				bothPlugged.countDown();
+				if (!bothPlugged.await(60, TimeUnit.SECONDS)) throw new IllegalStateException("partner never plugged in");
 				BooleanSupplier stopped = () -> stop;
 				long next = System.nanoTime();
 				while (!stop) {
