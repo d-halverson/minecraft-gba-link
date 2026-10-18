@@ -44,7 +44,7 @@ int main(int argc, char** argv) {
 	int (*run)(void*) = (int (*)(void*)) SYM(h, "gba_run_frame");
 	const uint8_t* (*fbf)(void*) = (const uint8_t* (*)(void*)) SYM(h, "gba_framebuffer");
 	size_t (*audio)(void*, int16_t*, size_t) = (size_t (*)(void*, int16_t*, size_t)) SYM(h, "gba_read_audio");
-	CHECK(api() == 4, "api version %u", api());
+	CHECK(api() == 5, "api version %u", api());
 	void* c = create();
 	CHECK(c != NULL, "create");
 	CHECK(load(c, argv[2]) == 0, "load rom");

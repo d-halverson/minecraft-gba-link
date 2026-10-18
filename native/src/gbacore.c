@@ -13,6 +13,9 @@
 #include <mgba/gb/core.h>
 #include <mgba/gb/interface.h>
 #include <mgba/internal/gb/gb.h>
+#include <mgba/internal/sm83/sm83.h>
+#include <mgba/internal/gb/sio.h>
+#include <mgba/internal/gb/sio/lockstep.h>
 #include <mgba/internal/gb/io.h>
 #include <mgba/internal/gb/mbc.h>
 #include <mgba/internal/gb/video.h>
@@ -28,12 +31,14 @@
 #include <mgba-util/vfs.h>
 
 #include <fcntl.h>
+#include <stdio.h>
+#include <stdio.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
-#define GBA_API_VERSION 4u
+#define GBA_API_VERSION 5u
 #define GB_MAX_ROM_BYTES (8 * 1024 * 1024)
 
 /* ------------------------------------------------------------------------------------ */
@@ -104,6 +109,28 @@ struct gba_link {
 	unsigned qhead, qtail;
 };
 
+/* ---- Game Boy classic link (API 5): one byte per transfer over the network, see "Game Boy link" below ---- */
+
+enum {
+	GBM_START = 0x10, /* master -> peer: [0x10][src][seq][byte][0] */
+	GBM_REPLY = 0x11, /* slave -> master: [0x11][src][seq][byte][valid] */
+};
+/* A START that finds the local game not armed (no SC = 0x80) is held this many video frames, then answered with 0xFF. */
+#define GB_PENDING_FRAMES 8
+
+enum GbMasterState { GM_IDLE, GM_WAIT };
+
+struct gba_core;
+struct gb_link {
+	struct GBSIODriver d;  /* must stay first: the driver callbacks cast back to this */
+	struct gba_core* c;
+	enum GbMasterState mstate;
+	uint8_t seq;           /* sequence number of the master transfer in flight */
+	bool pending;          /* a START from the peer is waiting for the local game to arm its port */
+	uint8_t pseq, pbyte;
+	int pendAge;           /* frames spent pending */
+};
+
 #define AUDIO_RING 16384 /* stereo frames */
 
 struct gba_core {
@@ -121,12 +148,14 @@ struct gba_core {
 	int16_t* ring;
 	size_t ringHead, ringCount;
 	bool rtcVirtual;        /* virtual RTC active (holds one reference on the process-wide UTC time zone) */
-	struct gba_link link;
-	/* API 3: member of a lockstep group (mGBA GBASIOLockstep) */
+	struct gba_link link;   /* Game Boy cores: only the plugged / index / count fields and the message queue are used */
+	struct gb_link gl;      /* Game Boy classic link driver (API 5) */
+	/* API 3: member of a lockstep group (mGBA GBASIOLockstep / GBSIOLockstep) */
 	struct gba_group* group;
 	int gidx;
 	color_t* shown;          /* last completed frame (group members) */
 	uint8_t* stash;          /* lockstep trailer of a loaded state, applied when the core joins a group */
+	int32_t gbNext;          /* Game Boy: cpu->nextEvent as loaded from the last state (scheduling the lockstep events must not change it) */
 };
 
 /* ---- helpers ---- */
@@ -631,6 +660,184 @@ static void linkInit(struct gba_core* c) {
 }
 
 /* ------------------------------------------------------------------------------------ */
+/* Game Boy link, classic mode (API 5)                                                  */
+/* ------------------------------------------------------------------------------------ */
+
+/* The Game Boy cable is one 8 bit shift register per console: the master (SC = 0x81, internal clock) shifts its SB out
+ * and the slave's SB in, one byte per transfer, 4096 cycles at 8192 Hz (512 cycles per bit; 16 with the CGB fast clock bit). A
+ * console that is not connected, or whose partner is not armed, reads 0xFF.
+ *
+ * Over a network the peer cannot be simulated locally (different ROMs), so every transfer is one round trip:
+ *   - the master writes SC = 0x81: mGBA's own completion ("nothing connected": 0xFF after 4096 cycles) is cancelled, a START
+ *     [byte] is queued and the core reports GBA_RUN_LINK_WAIT (its emulated time stands still) until the REPLY arrives;
+ *   - the slave, when the START arrives, answers at once with the SB it has armed (SC = 0x80, external clock) and completes
+ *     its own transfer (the master's byte shifts in over the normal 4096 cycles, SIO interrupt). A START that finds the
+ *     slave not armed is held for up to GB_PENDING_FRAMES frames and answered the moment the game arms its port (SC write),
+ *     else with an invalid reply (0xFF, like a cable with nothing on the other end);
+ *   - the master then shifts the reply in over the normal transfer time and raises its SIO interrupt.
+ * Both consoles clocking at once (both started a master transfer) is answered with 0xFF on both sides, like on hardware. */
+
+static struct gb_link* gbl(gba_core* c) { return &c->gl; }
+
+static void gbReply(struct gb_link* G, uint8_t seq, uint8_t byte, bool valid) {
+	uint8_t m[5] = { GBM_REPLY, (uint8_t) G->c->link.idx, seq, byte, valid ? 1 : 0 };
+	emit(&G->c->link, m, sizeof(m));
+}
+
+/* Make mGBA's SIO unit shift `byte` into SB over a normal transfer time and raise the SIO interrupt. */
+static void gbShiftIn(struct gb_link* G, uint8_t byte) {
+	struct GB* gb = G->c->gb;
+	struct GBSIO* s = &gb->sio;
+	s->pendingSB = byte;
+	s->remainingBits = 8;
+	mTimingDeschedule(&gb->timing, &s->event);
+	mTimingSchedule(&gb->timing, &s->event, 0);
+}
+
+static void gbMasterDone(struct gb_link* G, uint8_t byte) {
+	G->mstate = GM_IDLE;
+	if (G->c->gb->memory.io[GB_REG_SC] & 0x80) {
+		gbShiftIn(G, byte);
+	}
+}
+
+/* The peer's START is waiting and the local game has armed its port (SC = 0x80): take part in the transfer. */
+static bool gbTryPending(struct gb_link* G, uint8_t sc) {
+	if (!G->pending || (sc & 0x81) != 0x80) {
+		return false;
+	}
+	G->pending = false;
+	gbReply(G, G->pseq, G->c->gb->memory.io[GB_REG_SB], true);
+	gbShiftIn(G, G->pbyte);
+	return true;
+}
+
+static bool gbDrvInit(struct GBSIODriver* d) { UNUSED(d); return true; }
+static void gbDrvDeinit(struct GBSIODriver* d) { UNUSED(d); }
+static void gbDrvWriteSB(struct GBSIODriver* d, uint8_t value) { UNUSED(d); UNUSED(value); }
+
+static uint8_t gbDrvWriteSC(struct GBSIODriver* d, uint8_t value) {
+	struct gb_link* G = (struct gb_link*) d;
+	gba_core* c = G->c;
+	if (!c->link.plugged || c->group) {
+		return value; /* unplugged: mGBA's own "nothing connected" transfer (0xFF) */
+	}
+	struct GB* gb = c->gb;
+	if ((value & 0x81) == 0x81) {
+		/* mGBA has just scheduled the "nobody there" completion: cancel it, the reply decides */
+		mTimingDeschedule(&gb->timing, &d->p->event);
+		if (G->mstate == GM_IDLE) {
+			++G->seq;
+			uint8_t m[5] = { GBM_START, (uint8_t) c->link.idx, G->seq, gb->memory.io[GB_REG_SB], 0 };
+			emit(&c->link, m, sizeof(m));
+			G->mstate = GM_WAIT;
+		}
+	} else {
+		if (G->mstate == GM_WAIT && !(value & 0x80)) {
+			G->mstate = GM_IDLE; /* the game cancelled its transfer */
+		}
+		gbTryPending(G, value);
+	}
+	return value;
+}
+
+static void gbLinkInit(gba_core* c) {
+	memset(&c->link, 0, sizeof(c->link));
+	c->link.c = c;
+	c->link.count = 1;
+	c->link.dead = true; /* the GBA link code never runs for a Game Boy core */
+	struct gb_link* G = &c->gl;
+	memset(G, 0, sizeof(*G));
+	G->c = c;
+	G->d.init = gbDrvInit;
+	G->d.deinit = gbDrvDeinit;
+	G->d.writeSB = gbDrvWriteSB;
+	G->d.writeSC = gbDrvWriteSC;
+	GBSIOSetDriver(&c->gb->sio, &G->d);
+}
+
+/* Deterministic bookkeeping reset (load_rom, reset, load_state, leaving a group). */
+static void gbLinkReset(gba_core* c) {
+	struct gb_link* G = &c->gl;
+	G->mstate = GM_IDLE;
+	G->pending = false;
+	G->pendAge = 0;
+	G->seq = 0;
+	c->link.qhead = c->link.qtail = 0;
+}
+
+/* Finish whatever is in flight as if the partner was gone. */
+static void gbLinkAbort(gba_core* c) {
+	struct gb_link* G = &c->gl;
+	if (G->mstate == GM_WAIT) {
+		gbMasterDone(G, 0xFF);
+	}
+	if (G->pending) {
+		G->pending = false;
+		gbReply(G, G->pseq, 0xFF, false);
+	}
+}
+
+static void gbConfigure(gba_core* c, int idx, int count) {
+	struct gba_link* L = &c->link;
+	bool plugged = count == 2 && idx >= 0 && idx < 2; /* a Game Boy cable joins exactly two consoles */
+	int i = plugged ? idx : 0, n = plugged ? 2 : 1;
+	if (plugged == L->plugged && i == L->idx && n == L->count) {
+		return;
+	}
+	if (c->romLoaded) {
+		gbLinkAbort(c);
+	}
+	L->plugged = plugged;
+	L->idx = i;
+	L->count = n;
+	if (!plugged) {
+		L->qhead = L->qtail = 0;
+	}
+}
+
+static void gbDeliver(gba_core* c, int from, const uint8_t* d, size_t len) {
+	struct gb_link* G = &c->gl;
+	struct gba_link* L = &c->link;
+	if (!L->plugged || (from == L->idx) || len < 5) {
+		return;
+	}
+	if (!c->romLoaded) {
+		if (d[0] == GBM_START) { /* no game running here: answer so the master never blocks on us */
+			gbReply(G, d[2], 0xFF, false);
+		}
+		return;
+	}
+	if (d[0] == GBM_START) {
+		if (G->mstate == GM_WAIT) { /* both consoles clock at once: nobody gets a byte */
+			gbReply(G, d[2], 0xFF, false);
+			return;
+		}
+		G->pending = true;
+		G->pseq = d[2];
+		G->pbyte = d[3];
+		G->pendAge = 0;
+		gbTryPending(G, c->gb->memory.io[GB_REG_SC]);
+	} else if (d[0] == GBM_REPLY) {
+		if (G->mstate == GM_WAIT && d[2] == G->seq) {
+			gbMasterDone(G, d[4] ? d[3] : 0xFF);
+		}
+	}
+}
+
+/* once per finished frame */
+static void gbLinkFrameTick(gba_core* c) {
+	struct gb_link* G = &c->gl;
+	if (!G->pending) {
+		return;
+	}
+	if (!gbTryPending(G, c->gb->memory.io[GB_REG_SC]) && ++G->pendAge > GB_PENDING_FRAMES) {
+		G->pending = false;
+		gbReply(G, G->pseq, 0xFF, false);
+	}
+}
+
+/* ------------------------------------------------------------------------------------ */
 /* virtual RTC                                                                          */
 /* ------------------------------------------------------------------------------------ */
 
@@ -722,7 +929,7 @@ static struct mLogger g_nullLogger = { nullLog, NULL };
 
 /* group support (defined below) */
 #define GRP_TRAILER 128
-static bool grpTrailerValid(const uint8_t* t);
+static bool grpTrailerValid(const uint8_t* t, int platform);
 static void grpSaveTrailer(gba_core* c, uint8_t* out);
 static void grpBeforeLoad(gba_core* c);
 static void grpAfterLoad(gba_core* c, const uint8_t* trailer);
@@ -779,7 +986,7 @@ static bool coreInstall(gba_core* c, int platform) {
 		for (i = 0; i < 12; ++i) {
 			GBVideoSetPalette(&gb->video, (unsigned) i, g_dmgPalette[i & 3]);
 		}
-		c->link.dead = true; /* no serial link for Game Boy cores yet */
+		gbLinkInit(c); /* classic link driver (API 5); unplugged until gba_link_configure */
 	} else {
 		c->gba = core->board;
 		c->gb = NULL;
@@ -920,6 +1127,8 @@ GBA_API int gba_load_rom(gba_core* c, const char* path) {
 	resetFrameState(c);
 	if (c->platform == GBA_PLATFORM_GBA) {
 		linkReset(&c->link);
+	} else {
+		gbLinkReset(c);
 	}
 	return 0;
 }
@@ -933,6 +1142,8 @@ GBA_API void gba_reset(gba_core* c) {
 	resetFrameState(c);
 	if (c->platform == GBA_PLATFORM_GBA) {
 		linkReset(&c->link);
+	} else {
+		gbLinkReset(c);
 	}
 }
 
@@ -1040,15 +1251,30 @@ GBA_API int gba_run_frame(gba_core* c) {
 	}
 	if (c->platform == GBA_PLATFORM_GB) {
 		/* Like mCore::runFrame, but bounded: a broken or truncated ROM can sit in STOP / HALT with the LCD off and never finish
-		 * a frame, which must not hang the emulator thread. After four frames' worth of cycles the frame is reported anyway. */
+		 * a frame, which must not hang the emulator thread. After four frames' worth of cycles the frame is reported anyway.
+		 * Classic link (API 5): a master transfer stops the loop (GBA_RUN_LINK_WAIT) until the partner's reply is delivered;
+		 * the next call continues the SAME frame. */
 		struct GB* gb = c->gb;
-		uint32_t fc = gb->video.frameCounter;
-		int32_t t0 = mTimingCurrentTime(&gb->timing);
-		while (gb->video.frameCounter == fc && mTimingCurrentTime(&gb->timing) - t0 < 4 * GB_VIDEO_TOTAL_LENGTH) {
-			c->core->runLoop(c->core);
+		struct gb_link* G = &c->gl;
+		if (G->mstate == GM_WAIT) {
+			return GBA_RUN_LINK_WAIT;
 		}
+		if (!c->frameActive) {
+			c->frameActive = true;
+			c->frameStart = gb->video.frameCounter;
+			c->cycleStart = mTimingCurrentTime(&gb->timing);
+		}
+		while (gb->video.frameCounter == c->frameStart && mTimingCurrentTime(&gb->timing) - c->cycleStart < 4 * GB_VIDEO_TOTAL_LENGTH) {
+			c->core->runLoop(c->core);
+			if (G->mstate == GM_WAIT) {
+				drainAudio(c);
+				return GBA_RUN_LINK_WAIT;
+			}
+		}
+		c->frameActive = false;
 		finishFrame(c);
 		drainAudio(c);
+		gbLinkFrameTick(c);
 		return GBA_RUN_FRAME_DONE;
 	}
 	struct gba_link* L = &c->link;
@@ -1267,16 +1493,19 @@ GBA_API size_t gba_save_state(gba_core* c, uint8_t* out, size_t cap) {
 
 GBA_API int gba_load_state(gba_core* c, const uint8_t* data, size_t len) {
 	size_t base = c ? c->core->stateSize(c->core) : 0;
-	if (!c || !c->romLoaded || !data || (len != base && !(len == base + GRP_TRAILER && c->platform == GBA_PLATFORM_GBA))) {
+	if (!c || !c->romLoaded || !data || (len != base && len != base + GRP_TRAILER)) {
 		return -1;
 	}
-	bool trailer = len == base + GRP_TRAILER && grpTrailerValid(data + base);
+	bool trailer = len == base + GRP_TRAILER && grpTrailerValid(data + base, c->platform);
 	int64_t clockMs = c->rtcVirtual ? rtcFakeMs(c->core) : 0;
 	if (c->group) {
 		grpBeforeLoad(c);
 	}
 	if (!c->core->loadState(c->core, data)) {
 		return -2;
+	}
+	if (c->gb) {
+		c->gbNext = c->gb->cpu->nextEvent;
 	}
 	free(c->stash);
 	c->stash = NULL;
@@ -1292,6 +1521,8 @@ GBA_API int gba_load_state(gba_core* c, const uint8_t* data, size_t len) {
 	c->frameActive = false;
 	if (c->platform == GBA_PLATFORM_GBA) {
 		linkReset(&c->link);
+	} else {
+		gbLinkReset(c);
 	}
 	if (c->rtcVirtual) {
 		/* the state carries its own frame counter; keep the virtual clock where it was instead of jumping */
@@ -1303,6 +1534,12 @@ GBA_API int gba_load_state(gba_core* c, const uint8_t* data, size_t len) {
 /* ---- link API ---- */
 
 GBA_API void gba_link_configure(gba_core* c, int player_index, int player_count) {
+	if (c && c->platform == GBA_PLATFORM_GB) {
+		if (!c->group) {
+			gbConfigure(c, player_index, player_count);
+		}
+		return;
+	}
 	if (!c || c->group || c->platform != GBA_PLATFORM_GBA) {
 		return;
 	}
@@ -1336,10 +1573,10 @@ GBA_API void gba_link_configure(gba_core* c, int player_index, int player_count)
 }
 
 GBA_API size_t gba_link_poll_outgoing(gba_core* c, uint8_t* out, size_t cap) {
-	if (!c || !out || c->platform != GBA_PLATFORM_GBA) {
+	if (!c || !out) {
 		return 0;
 	}
-	struct gba_link* L = &c->link;
+	struct gba_link* L = &c->link; /* Game Boy cores use the same message queue */
 	if (L->qhead == L->qtail) {
 		return 0;
 	}
@@ -1354,7 +1591,13 @@ GBA_API size_t gba_link_poll_outgoing(gba_core* c, uint8_t* out, size_t cap) {
 }
 
 GBA_API void gba_link_deliver(gba_core* c, int from, const uint8_t* d, size_t len) {
-	if (!c || !d || len < 4 || from < 0 || from > 3 || c->platform != GBA_PLATFORM_GBA) {
+	if (!c || !d || len < 4 || from < 0 || from > 3) {
+		return;
+	}
+	if (c->platform == GBA_PLATFORM_GB) {
+		if (!c->group) {
+			gbDeliver(c, from, d, len);
+		}
 		return;
 	}
 	struct gba_link* L = &c->link;
@@ -1407,6 +1650,11 @@ GBA_API void gba_link_deliver(gba_core* c, int from, const uint8_t* d, size_t le
 struct gba_group {
 	struct GBASIOLockstep ls;
 	struct GBASIOLockstepNode nodes[MAX_GBAS];
+	/* Game Boy groups (API 5): mGBA's GBSIOLockstep for two consoles; the master role belongs to whichever console
+	 * starts a transfer first (gls.players[0]), p[] and cores[] are indexed by console, not by lockstep id */
+	int platform;
+	struct GBSIOLockstep gls;
+	struct GBSIOLockstepNode gnodes[MAX_GBS];
 	struct gba_core* cores[MAX_GBAS];
 	struct {
 		int awake;
@@ -1416,6 +1664,7 @@ struct gba_group {
 	int expected, added;
 	bool dissolved;
 	long stalls;
+	long lastRounds; /* scheduler rounds the last frame needed (diagnostics, gba_priv_group_rounds) */
 };
 
 static struct gba_group* grpOf(struct mLockstep* l) { return l->context; }
@@ -1524,6 +1773,10 @@ GBA_API gba_group* gba_group_create(int players) {
 	if (!g) {
 		return NULL;
 	}
+	g->platform = -1; /* decided by the first core added */
+	mLockstepInit(&g->gls.d);
+	GBSIOLockstepInit(&g->gls);
+	g->gls.d.context = g;
 	mLockstepInit(&g->ls.d);
 	GBASIOLockstepInit(&g->ls);
 	g->ls.d.context = g;
@@ -1541,12 +1794,312 @@ GBA_API gba_group* gba_group_create(int players) {
 	return g;
 }
 
+/* ---- Game Boy groups (API 5): mGBA's GBSIOLockstep, two consoles ---- */
+
+/* The lockstep numbers its nodes by role (id 0 = the console that started the transfer = master; ids swap when the other
+ * console starts one), our bookkeeping is by console. */
+static int gbCoreOf(struct gba_group* g, int id) {
+	struct GBSIOLockstepNode* n = id >= 0 && id < g->gls.d.attached ? g->gls.players[id] : NULL;
+	return n ? (int) (n - g->gnodes) : id;
+}
+
+static bool gbSignal(struct mLockstep* l, unsigned mask) {
+	struct gba_group* g = grpOf(l);
+	int m = gbCoreOf(g, 0);
+	bool woke = false;
+	g->p[m].waitMask &= ~mask;
+	if (!g->p[m].waitMask && g->p[m].awake < 1) {
+		g->p[m].awake = 1;
+		woke = true;
+	}
+	return woke;
+}
+
+static bool gbWait(struct mLockstep* l, unsigned mask) {
+	struct gba_group* g = grpOf(l);
+	int m = gbCoreOf(g, 0);
+	bool slept = false;
+	g->p[m].waitMask |= mask;
+	if (g->p[m].awake > 0) {
+		g->p[m].awake = 0;
+		slept = true;
+	}
+	return slept;
+}
+
+static void gbAddCycles(struct mLockstep* l, int id, int32_t cycles) {
+	struct gba_group* g = grpOf(l);
+	if (cycles < 0) {
+		abort();
+	}
+	if (id == 0) {
+		int s = gbCoreOf(g, 1);
+		g->p[s].posted += cycles;
+		if (g->p[s].awake < 1) {
+			g->gnodes[s].nextEvent += g->p[s].posted;
+		}
+		g->p[s].awake = 1;
+	} else {
+		g->p[gbCoreOf(g, id)].posted += cycles;
+	}
+}
+
+static int32_t gbUseCycles(struct mLockstep* l, int id, int32_t cycles) {
+	struct gba_group* g = grpOf(l);
+	int c = gbCoreOf(g, id);
+	g->p[c].posted -= cycles;
+	if (g->p[c].posted <= 0) {
+		g->p[c].awake = 0;
+	}
+	return g->p[c].posted;
+}
+
+static int32_t gbUnusedCycles(struct mLockstep* l, int id) {
+	struct gba_group* g = grpOf(l);
+	return g->p[gbCoreOf(g, id)].posted;
+}
+
+static void gbUnload(struct mLockstep* l, int id) {
+	UNUSED(l);
+	UNUSED(id); /* groups are dissolved all at once (gbGrpRelease), nothing to hand over */
+}
+
+static int gbMasterCore(struct gba_group* g) {
+	return g->gls.d.attached < 2 ? 0 : gbCoreOf(g, 0);
+}
+
+static void gbGrpInitCallbacks(struct gba_group* g) {
+	g->gls.d.signal = gbSignal;
+	g->gls.d.wait = gbWait;
+	g->gls.d.addCycles = gbAddCycles;
+	g->gls.d.useCycles = gbUseCycles;
+	g->gls.d.unusedCycles = gbUnusedCycles;
+	g->gls.d.unload = gbUnload;
+}
+
+#define TR_MAGIC_GB 0x324B4C47u /* "GLK2": Game Boy lockstep trailer */
+
+/* Trailer of one Game Boy member (128 bytes max): the lockstep state mGBA does not put in a state. A GB state holds no
+ * serial state at all (not even the SIO event), so the SIO unit's own fields are stored here too. */
+static void gbGrpSaveTrailer(gba_core* c, uint8_t* out) {
+	struct gba_group* g = c->group;
+	int i = c->gidx;
+	struct GBSIOLockstepNode* node = &g->gnodes[i];
+	struct GBSIO* sio = &c->gb->sio;
+	struct mTiming* t = &c->gb->timing;
+	uint32_t w[30];
+	int k = 0, j;
+	memset(w, 0, sizeof(w));
+	w[k++] = TR_MAGIC_GB;
+	w[k++] = (uint32_t) i;
+	w[k++] = (uint32_t) g->gls.d.transferActive;
+	w[k++] = (uint32_t) g->gls.d.transferCycles;
+	w[k++] = g->gls.masterClaimed ? 1 : 0;
+	w[k++] = g->gls.pendingSB[0];
+	w[k++] = g->gls.pendingSB[1];
+	w[k++] = (uint32_t) gbMasterCore(g);
+	w[k++] = (uint32_t) node->nextEvent;
+	w[k++] = (uint32_t) node->eventDiff;
+	w[k++] = node->transferFinished ? 1 : 0;
+	bool sched = mTimingIsScheduled(t, &node->event);
+	w[k++] = sched ? 1 : 0;
+	w[k++] = sched ? (uint32_t) mTimingUntil(t, &node->event) : 0;
+	w[k++] = (uint32_t) g->p[i].awake;
+	w[k++] = (uint32_t) g->p[i].posted;
+	w[k++] = g->p[i].waitMask;
+	w[k++] = (uint32_t) sio->period;
+	w[k++] = (uint32_t) sio->remainingBits;
+	w[k++] = sio->pendingSB;
+	bool ssched = mTimingIsScheduled(t, &sio->event);
+	w[k++] = ssched ? 1 : 0;
+	w[k++] = ssched ? (uint32_t) mTimingUntil(t, &sio->event) : 0;
+	for (j = 0; j < k; ++j) {
+		put32(out + 4 * j, w[j]);
+	}
+}
+
+static void gbGrpApplyTrailer(gba_core* c, const uint8_t* t, bool withGroupFields) {
+	struct gba_group* g = c->group;
+	int i = c->gidx;
+	struct GBSIOLockstepNode* node = &g->gnodes[i];
+	struct GBSIO* sio = &c->gb->sio;
+	struct mTiming* tm = &c->gb->timing;
+	int k = 2;
+	uint32_t ta = get32(t + 4 * k++);
+	uint32_t tc = get32(t + 4 * k++);
+	uint32_t claimed = get32(t + 4 * k++);
+	uint32_t psb0 = get32(t + 4 * k++);
+	uint32_t psb1 = get32(t + 4 * k++);
+	uint32_t master = get32(t + 4 * k++);
+	if (withGroupFields && g->gls.d.attached == 2) {
+		g->gls.d.transferActive = (enum mLockstepPhase) ta;
+		g->gls.d.transferCycles = (int32_t) tc;
+		g->gls.masterClaimed = claimed != 0;
+		g->gls.pendingSB[0] = (uint8_t) psb0;
+		g->gls.pendingSB[1] = (uint8_t) psb1;
+		int m = master == 1 ? 1 : 0;
+		g->gls.players[0] = &g->gnodes[m];
+		g->gls.players[1] = &g->gnodes[1 - m];
+		g->gnodes[m].id = 0;
+		g->gnodes[1 - m].id = 1;
+	}
+	node->nextEvent = (int32_t) get32(t + 4 * k++);
+	node->eventDiff = (int32_t) get32(t + 4 * k++);
+	node->transferFinished = get32(t + 4 * k++) != 0;
+	bool sched = get32(t + 4 * k++) != 0;
+	int32_t delta = (int32_t) get32(t + 4 * k++);
+	mTimingDeschedule(tm, &node->event);
+	if (sched) {
+		mTimingSchedule(tm, &node->event, delta);
+	}
+	g->p[i].awake = (int) get32(t + 4 * k++);
+	g->p[i].posted = (int32_t) get32(t + 4 * k++);
+	g->p[i].waitMask = get32(t + 4 * k++);
+	sio->period = (int32_t) get32(t + 4 * k++);
+	sio->remainingBits = (int) get32(t + 4 * k++);
+	sio->pendingSB = (uint8_t) get32(t + 4 * k++);
+	bool ssched = get32(t + 4 * k++) != 0;
+	int32_t sdelta = (int32_t) get32(t + 4 * k++);
+	mTimingDeschedule(tm, &sio->event);
+	if (ssched) {
+		mTimingSchedule(tm, &sio->event, sdelta);
+	}
+}
+
+/* No usable lockstep state (fresh join, reset, state without a trailer): an idle node, the SIO unit idle. */
+static void gbGrpFreshNode(gba_core* c) {
+	struct gba_group* g = c->group;
+	int i = c->gidx;
+	struct GBSIOLockstepNode* node = &g->gnodes[i];
+	struct GBSIO* sio = &c->gb->sio;
+	mTimingDeschedule(&c->gb->timing, &node->event);
+	mTimingDeschedule(&c->gb->timing, &sio->event);
+	sio->remainingBits = 0;
+	sio->pendingSB = 0xFF;
+	node->nextEvent = 0;
+	node->eventDiff = 0;
+	node->transferFinished = true;
+	g->gls.pendingSB[node->id] = c->gb->memory.io[GB_REG_SB];
+	mTimingSchedule(&c->gb->timing, &node->event, 0);
+	g->p[i].awake = 1;
+	g->p[i].posted = 0;
+	g->p[i].waitMask = 0;
+	if (i == 0) {
+		g->gls.d.transferActive = TRANSFER_IDLE;
+		g->gls.masterClaimed = false;
+		g->gls.pendingSB[0] = g->gls.pendingSB[1] = 0xFF;
+	}
+}
+
+static void gbGrpBeforeLoad(gba_core* c) {
+	struct GBSIOLockstepNode* node = &c->group->gnodes[c->gidx];
+	node->transferFinished = true;
+	mTimingDeschedule(&c->gb->timing, &node->event);
+}
+
+static void gbGrpRelease(struct gba_group* g, int i) {
+	gba_core* c = g->cores[i];
+	if (!c) {
+		return;
+	}
+	struct GBSIOLockstepNode* node = &g->gnodes[i];
+	struct GB* gb = c->gb;
+	mTimingDeschedule(&gb->timing, &node->event);
+	if (gb->sio.driver == &node->d) {
+		gb->sio.driver = &c->gl.d;
+		c->gl.d.p = &gb->sio;
+	}
+	if (!node->transferFinished && (gb->memory.io[GB_REG_SC] & 0x80)) {
+		/* a transfer was in flight: end it like a cable that was pulled (the game gets its interrupt, byte 0xFF) */
+		gb->sio.pendingSB = 0xFF;
+		gb->sio.remainingBits = 8;
+		mTimingDeschedule(&gb->timing, &gb->sio.event);
+		mTimingSchedule(&gb->timing, &gb->sio.event, 0);
+	}
+	c->group = NULL;
+	g->cores[i] = NULL;
+	free(c->shown);
+	c->shown = NULL;
+	gbLinkReset(c);
+}
+
+static long g_roundLimit = 4000000; /* scheduler rounds per frame before the group gives up (tests lower it) */
+void gba_priv_set_round_limit(long n) { g_roundLimit = n; }
+
+static int gbGroupRunFrame(struct gba_group* g) {
+	int n = g->added, i;
+	uint32_t start[MAX_GBS];
+	int32_t t0[MAX_GBS];
+	bool done[MAX_GBS];
+	for (i = 0; i < n; ++i) {
+		if (!g->cores[i] || !g->cores[i]->romLoaded) {
+			return GBA_RUN_ERROR;
+		}
+		start[i] = g->cores[i]->gb->video.frameCounter;
+		t0[i] = mTimingCurrentTime(&g->cores[i]->gb->timing);
+		done[i] = false;
+	}
+	long rounds = 0, idle = 0;
+	for (;;) {
+		bool all = true;
+		for (i = 0; i < n; ++i) {
+			all = all && done[i];
+		}
+		if (all) {
+			break;
+		}
+		if (++rounds > g_roundLimit) {
+			return GBA_RUN_ERROR;
+		}
+		bool stepped = false;
+		for (i = 0; i < n; ++i) {
+			int m = gbMasterCore(g);
+			if (g->p[i].awake < 1) {
+				continue;
+			}
+			if (done[i] && i != m && !(g->p[m].awake < 1 && (g->p[m].waitMask & 2u))) {
+				continue; /* finished its frame: only runs on when the master waits for it */
+			}
+			gba_core* c = g->cores[i];
+			c->core->runLoop(c->core);
+			stepped = true;
+			struct GB* gb = c->gb;
+			/* a ROM that never finishes a frame (LCD off, STOP) still reports one after four frames of cycles */
+			if (!done[i] && (gb->video.frameCounter != start[i] || mTimingCurrentTime(&gb->timing) - t0[i] >= 4 * GB_VIDEO_TOTAL_LENGTH)) {
+				done[i] = true;
+				finishFrame(c);
+				memcpy(c->shown, c->video, (size_t) GB_WIDTH * GB_HEIGHT * sizeof(color_t));
+			}
+		}
+		if (!stepped) {
+			++g->stalls;
+			if (++idle > 16) {
+				return GBA_RUN_ERROR;
+			}
+			for (i = 0; i < n; ++i) {
+				g->p[i].awake = 1;
+				g->p[i].waitMask = 0;
+				if (g->p[i].posted <= 0) {
+					g->p[i].posted = 512;
+				}
+			}
+		} else {
+			idle = 0;
+		}
+	}
+	g->lastRounds = rounds;
+	for (i = 0; i < n; ++i) {
+		drainAudio(g->cores[i]);
+	}
+	return GBA_RUN_FRAME_DONE;
+}
+
 /* ---- trailer: the lockstep state of one member, appended to its save state ---- */
 
 #define TR_MAGIC 0x314B4C47u /* "GLK1" */
 
-static bool grpTrailerValid(const uint8_t* t) {
-	return get32(t) == TR_MAGIC;
+static bool grpTrailerValid(const uint8_t* t, int platform) {
+	return get32(t) == (platform == GBA_PLATFORM_GB ? TR_MAGIC_GB : TR_MAGIC);
 }
 
 static size_t grpTrailer(gba_core* c) {
@@ -1554,6 +2107,10 @@ static size_t grpTrailer(gba_core* c) {
 }
 
 static void grpSaveTrailer(gba_core* c, uint8_t* out) {
+	if (c->platform == GBA_PLATFORM_GB) {
+		gbGrpSaveTrailer(c, out);
+		return;
+	}
 	struct gba_group* g = c->group;
 	int i = c->gidx;
 	struct GBASIOLockstepNode* node = &g->nodes[i];
@@ -1668,12 +2225,25 @@ static void grpFixNextEvent(gba_core* c) {
 }
 
 static void grpBeforeLoad(gba_core* c) {
+	if (c->platform == GBA_PLATFORM_GB) {
+		gbGrpBeforeLoad(c);
+		return;
+	}
 	struct GBASIOLockstepNode* node = &c->group->nodes[c->gidx];
 	node->transferFinished = true; /* a mode switch during the load must not flush the old transfer into the new state */
 	mTimingDeschedule(&c->gba->timing, &node->event);
 }
 
 static void grpAfterLoad(gba_core* c, const uint8_t* trailer) {
+	if (c->platform == GBA_PLATFORM_GB) {
+		if (trailer) {
+			gbGrpApplyTrailer(c, trailer, c->gidx == 0);
+		} else {
+			gbGrpFreshNode(c);
+		}
+		c->gb->cpu->nextEvent = c->gbNext; /* rescheduling the lockstep events must leave the state's own value alone */
+		return;
+	}
 	if (trailer) {
 		grpApplyTrailer(c, trailer, c->gidx == 0);
 	} else {
@@ -1684,10 +2254,38 @@ static void grpAfterLoad(gba_core* c, const uint8_t* trailer) {
 
 /* ---- joining / leaving ---- */
 
+/* mGBA's node event, when it has to "sleep" (the core cannot run on until the partner has posted cycles / caught up), asks the core
+ * to leave its event loop (earlyExit) and reschedules itself ONE cycle later. A CPU that is HALTed (Pokemon sits in HALT every
+ * frame) does not leave GBProcessEvents' outer loop at an earlyExit: it keeps advancing from event to event until it reaches an
+ * instruction boundary, and a one cycle step never advances the instruction state, so the core would spin forever inside one
+ * run loop call (with real threads mGBA simply blocks there). So when the node goes to sleep its event is pushed a few cycles
+ * further out (one machine cycle or more), which lets the halted core reach its next fetch and return to the scheduler. */
+#define GB_SLEEP_PUSH 8
+static void (*g_gbNodeCallback)(struct mTiming*, void*, uint32_t);
+
+static void gbNodeEvent(struct mTiming* timing, void* user, uint32_t cyclesLate) {
+	struct GBSIOLockstepNode* node = user;
+	g_gbNodeCallback(timing, user, cyclesLate);
+	if (node->d.p && node->d.p->p->earlyExit) {
+		mTimingDeschedule(timing, &node->event);
+		mTimingSchedule(timing, &node->event, (int32_t) cyclesLate + 1 + GB_SLEEP_PUSH);
+	}
+}
+
+static int gbGroupAdd(struct gba_group* g, gba_core* c);
+
 GBA_API int gba_group_add(gba_group* g, gba_core* c) {
-	if (!g || !c || !c->romLoaded || c->platform != GBA_PLATFORM_GBA || c->group || g->dissolved || g->added >= g->expected) {
+	if (!g || !c || !c->romLoaded || c->group || g->dissolved || g->added >= g->expected) {
 		return -1;
 	}
+	if (g->added > 0 && g->platform != c->platform) {
+		return -1; /* a Game Boy and a GBA cannot share a link */
+	}
+	if (c->platform == GBA_PLATFORM_GB) {
+		g->platform = GBA_PLATFORM_GB;
+		return gbGroupAdd(g, c);
+	}
+	g->platform = GBA_PLATFORM_GBA;
 	gba_link_configure(c, 0, 1); /* the classic cable is off while the core is in a group */
 	int i = g->added;
 	struct GBASIOLockstepNode* node = &g->nodes[i];
@@ -1734,6 +2332,10 @@ GBA_API int gba_group_add(gba_group* g, gba_core* c) {
 }
 
 static void grpRelease(struct gba_group* g, int i) {
+	if (g->platform == GBA_PLATFORM_GB) {
+		gbGrpRelease(g, i);
+		return;
+	}
 	gba_core* c = g->cores[i];
 	if (!c) {
 		return;
@@ -1766,6 +2368,62 @@ static void grpDissolve(struct gba_group* g) {
 	g->dissolved = true;
 }
 
+static int gbGroupAdd(struct gba_group* g, gba_core* c) {
+	if (g->expected > MAX_GBS || g->added >= MAX_GBS) {
+		return -1; /* a Game Boy cable joins two consoles */
+	}
+	gba_link_configure(c, 0, 1); /* the classic cable is off while the core is in a group */
+	int i = g->added;
+	struct GBSIOLockstepNode* node = &g->gnodes[i];
+	memset(node, 0, sizeof(*node));
+	GBSIOLockstepNodeCreate(node);
+	if (i == 0) {
+		gbGrpInitCallbacks(g);
+	}
+	if (!GBSIOLockstepAttachNode(&g->gls, node)) {
+		return -2;
+	}
+	node->transferFinished = true;
+	g->cores[i] = c;
+	g->added = i + 1;
+	c->group = g;
+	c->gidx = i;
+	if (!c->shown) {
+		c->shown = calloc((size_t) GBA_WIDTH * GBA_HEIGHT, sizeof(color_t));
+	}
+	if (c->shown) {
+		memcpy(c->shown, c->video, (size_t) GBA_WIDTH * GBA_HEIGHT * sizeof(color_t));
+	}
+	GBSIOSetDriver(&c->gb->sio, &node->d);
+	if (node->event.callback != gbNodeEvent) {
+		g_gbNodeCallback = node->event.callback;
+		node->event.callback = gbNodeEvent;
+	}
+	node->transferFinished = true;
+	/* the byte the game armed before joining (SB) is what the partner gets if it clocks first: the lockstep only learns of SB writes it sees */
+	g->gls.pendingSB[node->id] = c->gb->memory.io[GB_REG_SB];
+	g->p[i].awake = 1;
+	g->p[i].posted = 0;
+	g->p[i].waitMask = 0;
+	if (g->added == g->expected) {
+		bool all = true;
+		for (i = 0; i < g->added; ++i) {
+			all = all && g->cores[i]->stash;
+		}
+		if (all) {
+			for (i = 0; i < g->added; ++i) {
+				gbGrpApplyTrailer(g->cores[i], g->cores[i]->stash, i == 0);
+				g->cores[i]->gb->cpu->nextEvent = g->cores[i]->gbNext;
+			}
+		}
+		for (i = 0; i < g->added; ++i) {
+			free(g->cores[i]->stash);
+			g->cores[i]->stash = NULL;
+		}
+	}
+	return 0;
+}
+
 /* a member is destroyed or reloaded: the whole group falls apart (see gbacore.h) */
 static void grpDetach(gba_core* c) {
 	grpDissolve(c->group);
@@ -1784,6 +2442,9 @@ GBA_API void gba_group_destroy(gba_group* g) {
 GBA_API int gba_group_run_frame(gba_group* g) {
 	if (!g || g->dissolved || g->added < 1) {
 		return GBA_RUN_ERROR;
+	}
+	if (g->platform == GBA_PLATFORM_GB) {
+		return gbGroupRunFrame(g);
 	}
 	int n = g->added, i;
 	uint32_t start[MAX_GBAS];
@@ -1854,11 +2515,17 @@ int gba_priv_group_round(gba_group* g) {
 		if (g->p[i].awake < 1) {
 			continue;
 		}
-		ARMRunLoop(g->cores[i]->core->cpu);
+		if (g->platform == GBA_PLATFORM_GB) {
+			g->cores[i]->core->runLoop(g->cores[i]->core);
+		} else {
+			ARMRunLoop(g->cores[i]->core->cpu);
+		}
 		m |= 1 << i;
 	}
 	return m;
 }
+
+long gba_priv_group_rounds(gba_group* g) { return g ? g->lastRounds : 0; }
 
 GBA_API long gba_group_stalls(gba_group* g) {
 	return g ? g->stalls : 0;
@@ -1919,7 +2586,7 @@ int64_t gba_priv_rtc_unix(gba_core* c) {
 }
 int gba_priv_link_waiting(gba_core* c) {
 	if (c->platform != GBA_PLATFORM_GBA) {
-		return 0;
+		return c->gl.mstate == GM_WAIT || c->gl.pending;
 	}
 	return c->link.mstate == M_WAIT || c->link.cstate == C_BUSY;
 }

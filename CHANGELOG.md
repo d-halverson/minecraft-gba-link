@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.5.1
+
+* **The Link Cable works for Game Boy and Game Boy Color games**, the same item and the same steps as for GBA (link to a nearby player,
+  Unlink, "Linked to X" HUD, confirm before leaving a link): the games' own link menus work over the Minecraft server. Pokemon Red's
+  Cable Club, Trade Center and a complete trade between two real clients were verified (same ROM, netplay). Pairs that can link:
+  GBA with GBA (2 to 4), Game Boy / Game Boy Color with Game Boy / Game Boy Color (2). A Game Boy game never links with a GBA game:
+  both players get "Can't link: X plays a Game Boy Advance game, you play a Game Boy / Color game" and keep playing.
+* **Netplay for Game Boy games (same ROM).** Every client simulates both consoles, linked by mGBA's own `GBSIOLockstep`; only inputs,
+  frame numbers and hashes cross the network (adaptive input delay, desync check and resync, shared virtual clock), exactly like GBA.
+* **Different ROMs (e.g. Pokemon Red with Blue): classic Game Boy link**, a byte-by-byte link driver: the console that starts a transfer
+  (SC = 0x81) waits for the other console's byte (one round trip per byte), the other console answers on arrival (answering 0xFF if its
+  game has not armed the serial port within 8 frames, and when both consoles clock at once). Clearly warned as slow; measured with real
+  Pokemon Red dumps: reaches the Trade Center at 0 ms and from 33 ms up to 400 ms one way (players starting the conversation at
+  different moments). Mixed Game Boy / Game Boy Color pairs work the same way.
+* **Native API 5** (older libraries keep working: an API 4 library plays Game Boy games single player and the mod says "Game Boy link
+  needs a newer emulator library"): `gba_group_*` and `gba_link_*` now accept Game Boy cores (2 consoles, one platform per group),
+  state trailer for Game Boy groups, a fix so a HALTed console cannot spin forever when the lockstep puts it to sleep.
+* **Protocol still 4, additive only**: `hello` caps get `CAP_GAMEBOY_LINK`, an optional `cable_systems` packet (only sent to clients that
+  registered it) tells the HUD what each cabled player runs; the server leaves a Game Boy game of a client without the capability out of
+  the link with a message. No registered items or blocks.
+* **Tests:** native `gblink` (lockstep and classic byte exchange, master role by whoever clocks first, CGB fast clock, collisions, state
+  reload equivalence of the group trailer, dissolve, latency, unplug, idle partner) and `determinism_gblink` (pinned CRCs, compared by CI
+  on all platforms through the Java hash check), Java `GameBoyLinkTest`, `GameBoyNetplayTest` (two clients with a fake relay, desync
+  injection and resync, leaving), `LinkRulesTest` and new `EffectiveLinkTest` cases. ROMs: `native/tests/make_gb_link_rom.py`.
+* **Dev tools:** `gb_pair_harness` (two real cartridges linked in one process, scripted keys, screenshots) and `gb_harness` state / poke
+  options; dev autotest commands `gbpoke` / `gblog`.
+
 ## 0.5.0
 
 * **Configurable controls.** A new **Controls** button (GBA screen buttons, CRT Options panel) opens a key map screen listing A, B, L, R,

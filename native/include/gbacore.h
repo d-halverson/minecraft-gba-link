@@ -1,5 +1,5 @@
 /* gbacore.h - C ABI of the GBA / Game Boy / Game Boy Color emulator shim (mGBA 0.10.5 + serial-level GBA link cable).
- * Contract: gba/SPEC.md. API version 4. */
+ * Contract: gba/SPEC.md. API version 5. */
 #ifndef GBACORE_H
 #define GBACORE_H
 
@@ -42,7 +42,7 @@ typedef struct gba_core gba_core;
                                   to continue the SAME frame */
 #define GBA_RUN_ERROR     -1
 
-GBA_API uint32_t    gba_api_version(void);              /* returns 4 for this spec (3 = GBA only, 2 = no groups, 1 = no gba_set_rtc) */
+GBA_API uint32_t    gba_api_version(void);              /* returns 5 for this spec (4 = Game Boy without link, 3 = GBA only, 2 = no groups, 1 = no gba_set_rtc) */
 GBA_API gba_core*   gba_create(void);
 GBA_API void        gba_destroy(gba_core*);
 
@@ -90,13 +90,16 @@ GBA_API size_t      gba_state_size(gba_core*);
 GBA_API size_t      gba_save_state(gba_core*, uint8_t* out, size_t cap);
 GBA_API int         gba_load_state(gba_core*, const uint8_t* data, size_t len);
 
-/* ---- Link cable (GBA only) ----
-   A Game Boy core has no link support yet (API 4): gba_link_configure is ignored, gba_link_poll_outgoing returns 0,
-   gba_link_deliver is ignored and gba_group_add fails (-1). Check gba_platform() first.
+/* ---- Link cable ----
    Messages are OPAQUE to Java and the server: Java only forwards bytes between cores.
-   player_index: 0 = parent/master, 1..3 = children. player_count < 2 = cable unplugged.
+   GBA: player_index 0 = parent/master, 1..3 = children. player_count < 2 = cable unplugged.
+   Game Boy / Game Boy Color (API 5, "classic" link for players with different ROMs): exactly two consoles, player_index 0 or
+   1, player_count 2; any other count unplugs. There is no master/slave by index: whichever console starts a transfer
+   (SC = 0x81) is the master, it sends its byte, returns GBA_RUN_LINK_WAIT until the other console's byte arrives (one network
+   round trip per byte), then finishes the transfer; the other console answers on arrival (see native/README.md).
+   Game Boy and GBA cores can never be linked to each other (the host must not try).
    Changing configuration while GBA_RUN_LINK_WAIT is pending must unblock the core
-   (pending transfer completes as if no partner: 0xFFFF / 0xFFFFFFFF). */
+   (pending transfer completes as if no partner: 0xFFFF / 0xFFFFFFFF, Game Boy: 0xFF). */
 GBA_API void        gba_link_configure(gba_core*, int player_index, int player_count);
 /* Pop one outgoing message; returns its length (1..GBA_LINK_MSG_MAX), 0 if none. */
 GBA_API size_t      gba_link_poll_outgoing(gba_core*, uint8_t* out, size_t cap);
@@ -119,7 +122,8 @@ GBA_API int         gba_set_rtc(gba_core*, int64_t epoch_seconds, int mode);
    Several cores of ONE process linked with mGBA's own GBASIOLockstep (the code behind mGBA's multiplayer windows) and
    stepped by this library in a fixed order on the calling thread: deterministic, no link messages, no LINK_WAIT.
    Used by input-sync netplay. A core in a group has its classic cable unplugged and cannot be run with gba_run_frame.
-   Create the group for n cores (1..4), then gba_group_add the cores in player order (index 0 = master); load the ROM
+   Create the group for n cores (GBA 1..4, Game Boy / Color 2; API 5: mGBA's GBSIOLockstep, the master role goes to whichever
+   console starts a transfer), then gba_group_add the cores in player order (index 0 = master); load the ROM
    (and save / state / virtual RTC) BEFORE adding. gba_group_run_frame advances every core by one video frame (each
    core's framebuffer shows its completed frame; audio is queued per core).
    Save states of grouped cores carry the lockstep state in a trailer (gba_state_size grows by 128 bytes); states with
@@ -129,7 +133,7 @@ GBA_API int         gba_set_rtc(gba_core*, int64_t epoch_seconds, int mode);
    their classic link driver back (idle). */
 typedef struct gba_group gba_group;
 GBA_API gba_group*  gba_group_create(int players);
-GBA_API int         gba_group_add(gba_group*, gba_core*);          /* 0 ok, <0 error (also for a Game Boy core) */
+GBA_API int         gba_group_add(gba_group*, gba_core*);          /* 0 ok, <0 error (also for a core of another platform than the group's) */
 GBA_API int         gba_group_run_frame(gba_group*);                /* GBA_RUN_FRAME_DONE or GBA_RUN_ERROR */
 GBA_API void        gba_group_destroy(gba_group*);
 /* Diagnostics: how often the scheduler found every core asleep and had to wake them (expected 0). */

@@ -1,6 +1,6 @@
 # GBA Link
 
-Play Game Boy Advance, Game Boy and Game Boy Color games inside Minecraft, and link up with friends using a Link Cable (GBA games).
+Play Game Boy Advance, Game Boy and Game Boy Color games inside Minecraft, and link up with friends using the same Link Cable for all of them (trade, battle, 2 player games).
 A Fabric mod for **Minecraft 26.3**, built on the [mGBA](https://mgba.io/) emulator core.
 
 ![The in-game Game Boy Advance screen](docs/screenshot.png)
@@ -45,6 +45,16 @@ Two players linked with a cable (netplay, both running Pokemon Emerald with thei
 
 *One player opening the Summary / Trade menu for a party member. The actual exchange of Pokemon was not completed in this capture session.*
 
+Two players linked with a cable (netplay, both running Pokemon Red, a Game Boy game, each with their own save), in the Cable Club:
+
+![Pokemon Red trade screen over the link](docs/img/red-link-trade-select.png)
+
+*The Pokemon Red trade screen on one player's GBA screen (the status line shows "Link: P2 of 2 - netplay"): both parties are listed, ASH's SQUIRTLE and RED's CHARMANDER. The two saves were made for this test (the second one is the first with another name, trainer ID and starter species).*
+
+![After the trade](docs/img/red-link-trade-done.png)
+
+*The same screen after the trade went through: the party lists are swapped. Verified with two real clients and a real server; see [Link cable](#link-cable) for what works and what does not.*
+
 ## What it is
 
 * **A playable GBA in your inventory.** Craft a Game Boy Advance, burn a game onto a Blank Game Pak,
@@ -52,8 +62,8 @@ Two players linked with a cable (netplay, both running Pokemon Emerald with thei
   **Game Boy (`.gb`) and Game Boy Color (`.gbc`) games** (see [Supported systems](#supported-systems)).
 * **A CRT TV.** Craft a big wooden TV cabinet with a console and controller built in, place it in the world, and play
   on the TV itself while friends nearby watch the picture and hear the sound (see [CRT TV](#crt-tv)).
-* **Real link cable support.** Use a Link Cable on a friend and play multiplayer GBA games together
-  (2 to 4 players), for example trading or battling.
+* **Real link cable support.** Use a Link Cable on a friend and play multiplayer games together, for example trading or
+  battling: GBA games with 2 to 4 players, Game Boy and Game Boy Color games with 2 (0.5.1).
 * **Saves live on the server**, inside each Game Pak, so a pak keeps its progress when you hand it to a
   friend or log in from another computer. Closing the screen suspends your game exactly where it was; save states
   (F5 / F8), fast-forward (Space or Tab) and `.sav` export / import are built in.
@@ -76,9 +86,8 @@ Works on Windows (x64), macOS (Intel and Apple Silicon) and Linux (x64).
 The system is read from the ROM's header, not from the file name: a Game Boy ROM needs the Nintendo logo and a valid header
 checksum and may be at most 8 MiB; a GBA ROM needs its fixed header byte and may be at most 32 MiB. Files that fail these checks
 are listed with the reason in the burn screen. Super Game Boy borders are off (Super Game Boy games run as plain Game Boy
-games, 160x144). **Link cable support for Game Boy games is coming later**: with a Game Boy or Game Boy Color game open
-the status says "Link cable for Game Boy games isn't supported yet" and you behave as unlinked (other players keep linking
-among themselves). Battery saves (including the real-time clock of Pokémon Gold / Silver / Crystal cartridges), save states,
+games, 160x144). **Game Boy and Game Boy Color games use the link cable too** (since 0.5.1, see [Link cable](#link-cable)).
+Battery saves (including the real-time clock of Pokémon Gold / Silver / Crystal cartridges), save states,
 suspend / power switch, `.sav` export / import, the CRT TV and its viewers all work for Game Boy games.
 
 ## Which file do I need?
@@ -377,11 +386,21 @@ too (with the optional resource pack) but only players with the mod can play or 
 
 ## Link cable
 
-Hold a Link Cable and **right-click another player** who is within **16 blocks** and also has the mod. (GBA games only for now: a
-player with a Game Boy or Game Boy Color game open does not take part in the link yet, see [Supported systems](#supported-systems).)
-Up to **4 players** can share one cable room; use the cable on each additional friend. Then everyone
-**opens their GBA** (with a link-capable game, such as a trading or multiplayer menu) and the games find
-each other, just like real GBAs. You are disconnected if you wander out of range, or with `/gba unlink`.
+Hold a Link Cable and **right-click another player** who is within **16 blocks** and also has the mod. Up to **4 players**
+can share one cable room; use the cable on each additional friend. Then everyone **opens their GBA** (with a link-capable
+game, such as a trading or multiplayer menu) and the games find each other, just like real GBAs. You are disconnected if
+you wander out of range, or with `/gba unlink`. It is the same item and the same steps for every kind of game.
+
+Who can link with whom (the server decides from the games that are open):
+
+| Open games | Link |
+| --- | --- |
+| GBA with GBA | yes, 2 to 4 players |
+| Game Boy / Game Boy Color with Game Boy / Game Boy Color (GB with GB, GBC with GBC, GB with GBC) | yes, **2 players** (a Game Boy cable joins two consoles) |
+| Game Boy (or Color) with GBA | **never**: both players see "Can't link: X plays a Game Boy Advance game, you play a Game Boy / Color game" and keep playing, nothing breaks |
+
+Whether two *games* work together is up to the games, as with real cartridges (for example Pokemon Gold / Silver / Crystal
+trade with Red / Blue / Yellow only in the time capsule; Red and Crystal do not battle each other).
 
 ### Netplay: full speed over the internet (same game)
 
@@ -403,11 +422,27 @@ Pokémon game), the link runs in **netplay** mode:
 
 More detail: [`docs/netplay.md`](docs/netplay.md).
 
+### Game Boy and Game Boy Color
+
+Same ROM (identical SHA-1, e.g. two Pokemon Red paks) runs the same netplay as GBA: every player's computer simulates both Game
+Boys, joined by mGBA's own Game Boy link code, and only the buttons travel. Pokemon Red's Cable Club, the Trade Center and
+a complete trade were verified between two real clients and a real server (screenshots above; the trade selection screen,
+the "Please wait!" handshake and the swap all ran with 0 desyncs at 60 fps). Other Game Boy link games use the same path but only the synthetic test ROMs were tried (no other commercial game).
+
 ### Classic link (different games)
 
-If the players have **different** ROMs (e.g. Ruby with Emerald), the status line says
-`Link (different games — slow mode)`. Each link transfer then waits for a network round trip, so games
-that link every frame slow down with ping (fine on a LAN, slow over the internet).
+If the players have **different** ROMs (e.g. Ruby with Emerald, or Pokemon Red with Blue), the status line says
+`Link (different games — slow, may fail online)` and a message is shown. Each link transfer then waits for a network round
+trip, so games that link every frame slow down with ping (fine on a LAN, slow over the internet).
+
+For Game Boy games this is a byte-by-byte link: the console that starts a transfer waits (its game stands still) for the other
+console's byte, one network round trip per byte, while the other console keeps running. What was measured (real Pokemon Red
+cartridge dumps, two cores in one process with a simulated delay, not over a real network): the Cable Club handshake reaches the
+Trade Center at 0 ms and at one way delays from 33 ms up to 400 ms **when the two players start the conversation with the
+receptionist at different moments** (as people do). If both start at exactly the same frame the two consoles can collide
+forever at the master election (hardware has the same race). Trading itself was verified only through the same ROM
+netplay path above, not through the classic path. Treat the different-ROM Game Boy link as "may work on a LAN or a good
+connection, try the same ROM for anything important"; the mod warns about it every time.
 
 ## Supported platforms
 
@@ -451,10 +486,13 @@ submodule.
 
 ## Known limitations
 
-* **Netplay needs the same ROM** on every linked Game Pak; different games use the slower classic link.
+* **Netplay needs the same ROM** on every linked Game Pak; different games use the slower classic link (for Game Boy games a
+  byte-by-byte link, see above).
   Netplay has a small input delay (2–10 frames, adaptive), and it has been tested with homebrew link
   ROMs and simulated ping, not yet with every commercial game. Please report games that desync.
-* **Game Boy and Game Boy Color:** single player only for now (no link cable, no netplay; a Game Boy link is planned). DMG games use a
+* **Game Boy and Game Boy Color:** link between Game Boy games needs the 0.5.1 native library on both sides (older ones play
+  single player only and show a message); Game Boy and GBA games never link with each other; a Game Boy cable joins two players
+  only; the 4 player adapter is not emulated. DMG games use a
   fixed green palette (no choice of colours), Game Boy Color games get no colour correction, there are no Super Game Boy borders or
   colours, and no GB / GBC BIOS is used. mGBA does not allow Left+Right or Up+Down at once. CRT TV and spectators show the Game Boy picture
   letterboxed in the 240x160 canvas (centred 1:1, black bars) rather than scaled up.

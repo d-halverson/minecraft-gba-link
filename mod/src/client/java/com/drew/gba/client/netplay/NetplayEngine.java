@@ -537,8 +537,9 @@ public final class NetplayEngine implements AutoCloseable {
 		GbaCore c = localCore;
 		if (c == null) return false;
 		byte[] st = c.saveState();
-		st[0x21000 + 0x100] ^= 0x5A; // EWRAM
-		st[0x21000 + 0x101] ^= 0xA5;
+		int wram = c.isGameBoy() ? 0x4F00 : 0x21000; // GBA: EWRAM in the state; Game Boy: a spot inside its work RAM
+		st[wram + 0x100] ^= 0x5A;
+		st[wram + 0x101] ^= 0xA5;
 		return c.loadState(st);
 	}
 }

@@ -2,10 +2,13 @@
  * and writes PNG screenshots (2x) so a real cartridge dump can be judged by eye. Never copy the ROM anywhere.
  *
  *   gb_harness rom=game.gbc out=prefix frames=N [shotAt=f1,f2,...] [shot=every] [script="60:S 5:A ..."]
- *              [sav=in.sav] [saveOut=out.sav] [wavOut=out.wav]
+ *              [sav=in.sav] [saveOut=out.sav] [wavOut=out.wav] [stateIn=file] [stateOut=file] [watch=C100,C101] [watchEvery=N]
+ *   stateIn / stateOut: raw core states (loaded after the ROM and the save), so a long scripted run (a Pokemon intro) can be continued
+ *   in steps. watch prints those work RAM bytes every watchEvery frames (default: at the end only).
  *
  * Script keys: A B E(select) S(start) R(ight) L(eft) U D (GBA-style letters as in emerald_harness: R=right, L=left). */
 #include "gbacore.h"
+#include "gbacore_priv.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -144,6 +147,11 @@ int main(int argc, char** argv) {
 	const char* shotAt = arg(argc, argv, "shotAt", NULL);
 	const char* sav = arg(argc, argv, "sav", NULL);
 	const char* saveOut = arg(argc, argv, "saveOut", NULL);
+	const char* stateIn = arg(argc, argv, "stateIn", NULL);
+	const char* stateOut = arg(argc, argv, "stateOut", NULL);
+	const char* watch = arg(argc, argv, "watch", NULL);
+	const char* poke = arg(argc, argv, "poke", NULL); /* poke=D158:80,D159:92 : bytes written to the work RAM right after the state is loaded */
+	long watchEvery = atol(arg(argc, argv, "watchEvery", "0"));
 	if (!rom) { fprintf(stderr, "usage: gb_harness rom=... out=prefix frames=N [shotAt=a,b] [shot=every] [script=...] [sav=..] [saveOut=..]\n"); return 2; }
 	struct Script sc;
 	parse_script(&sc, arg(argc, argv, "script", NULL));
@@ -158,6 +166,23 @@ int main(int argc, char** argv) {
 		uint8_t* b = slurp(sav, &n);
 		if (!b || gba_load_save(c, b, n) != 0) { printf("cannot load save\n"); return 2; }
 		free(b);
+	}
+	if (stateIn) {
+		size_t n;
+		uint8_t* b = slurp(stateIn, &n);
+		if (!b || gba_load_state(c, b, n) != 0) { printf("cannot load state %s\n", stateIn); return 2; }
+		free(b);
+	}
+	if (poke) {
+		const char* q = poke;
+		while (*q) {
+			unsigned long a = strtoul(q, (char**) &q, 16);
+			if (*q == ':') ++q;
+			unsigned long v = strtoul(q, (char**) &q, 16);
+			uint32_t w = gba_priv_read32(c, (uint32_t) a);
+			gba_priv_write32(c, (uint32_t) a, (w & 0xFFFFFF00u) | (uint32_t) (v & 0xFF)); /* the 3 following bytes are written back unchanged */
+			if (*q == ',') ++q; else break;
+		}
 	}
 	uint8_t* big = malloc((size_t) W * 2 * H * 2 * 4);
 	long long audio = 0;
@@ -175,6 +200,12 @@ int main(int argc, char** argv) {
 			for (size_t i = 0; i < n; ++i) used += b[i] != 0xFF;
 			printf("frame %ld save bytes in use: %zu\n", f, used);
 			free(b);
+		}
+		if (watch && ((watchEvery && (f + 1) % watchEvery == 0) || f + 1 == frames)) {
+			printf("frame %ld watch:", f + 1);
+			const char* q = watch;
+			while (*q) { unsigned long a = strtoul(q, (char**) &q, 16); printf(" %04lX=%02X", a, gba_priv_read16(c, (uint32_t) a) & 0xFF); if (*q == ',') ++q; else break; }
+			printf("\n");
 		}
 		int take = every != NULL && (f + 1) % atol(every) == 0;
 		if (!take && shotAt) {
@@ -199,6 +230,14 @@ int main(int argc, char** argv) {
 		}
 	}
 	printf("frames=%ld audio=%lld (%.1f per frame) dirty=%d\n", frames, audio, (double) audio / frames, gba_save_dirty(c));
+	if (stateOut) {
+		size_t n = gba_state_size(c);
+		uint8_t* b = malloc(n);
+		n = gba_save_state(c, b, n);
+		FILE* fo = fopen(stateOut, "wb");
+		if (fo) { fwrite(b, 1, n, fo); fclose(fo); printf("state %zu bytes -> %s\n", n, stateOut); }
+		free(b);
+	}
 	if (saveOut) {
 		size_t n = gba_save_size(c);
 		uint8_t* b = malloc(n ? n : 1);

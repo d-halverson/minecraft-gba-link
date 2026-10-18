@@ -117,6 +117,7 @@ public class GbaLinkClient implements ClientModInitializer {
 		});
 		ClientPlayNetworking.registerGlobalReceiver(Payloads.CrtVolume.TYPE, (p, ctx) -> CrtClient.onVolume(p));
 		ClientPlayNetworking.registerGlobalReceiver(Payloads.CableState.TYPE, (p, ctx) -> ClientCable.onState(p, ctx.client()));
+		ClientPlayNetworking.registerGlobalReceiver(Payloads.CableSystems.TYPE, (p, ctx) -> ClientCable.onSystems(p));
 		ClientPlayNetworking.registerGlobalReceiver(Payloads.CrtAudioRange.TYPE, (p, ctx) -> com.drew.gba.client.crt.CrtAudio.setRange(p.blocks()));
 		net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry.attachElementAfter(
 			net.fabricmc.fabric.api.client.rendering.v1.hud.VanillaHudElements.MISC_OVERLAYS,
@@ -199,13 +200,14 @@ public class GbaLinkClient implements ClientModInitializer {
 		}
 	}
 
-	/** Capability bits for Hello: netplay (native API 3) and Game Boy (API 4). Loads the library, which is cheap and cached. */
+	/** Capability bits for Hello: netplay (native API 3), Game Boy (API 4) and Game Boy link (API 5). Loads the library, which is cheap and cached. */
 	private static int netplayCaps() {
 		try {
 			GbaNative n = GbaNative.get(FabricLoader.getInstance().getGameDir());
 			if (n == null) return 0;
 			return (n.supportsNetplay() ? Payloads.Hello.CAP_NETPLAY | Payloads.Hello.CAP_NETPLAY_LOCKSTEP : 0)
-				| (n.supportsGameBoy() ? Payloads.Hello.CAP_GAMEBOY : 0);
+				| (n.supportsGameBoy() ? Payloads.Hello.CAP_GAMEBOY : 0)
+				| (n.supportsGameBoyLink() ? Payloads.Hello.CAP_GAMEBOY_LINK : 0);
 		} catch (Throwable t) {
 			return 0;
 		}

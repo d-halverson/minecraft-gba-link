@@ -78,30 +78,52 @@ class EffectiveLinkTest {
 		assertNotEquals(EffectiveLink.states(ROOM, java.util.Set.of("c", "d")::contains, false).get("c"), st.get("c"));
 	}
 
-	@Test
-	void gameBoyPlayersAreLeftOutOfTheLinkWithoutBreakingTheOthers() {
-		// a, b and c have a session open; c plays a Game Boy game (not linkable yet), d has nothing open
-		Set<String> open = Set.of("a", "b", "c");
-		Set<String> gb = Set.of("c");
-		java.util.function.Predicate<String> linkable = k -> open.contains(k) && EffectiveLink.linkSupported(gb.contains(k) ? "gbc" : "gba");
-		Map<String, EffectiveLink.State> s = EffectiveLink.states(ROOM, linkable);
-		assertEquals(new EffectiveLink.State(0, 2), s.get("a"));
-		assertEquals(new EffectiveLink.State(1, 2), s.get("b"));
-		assertEquals(EffectiveLink.State.UNPLUGGED, s.get("c"), "the Game Boy player is behaving as unlinked");
-		assertEquals(EffectiveLink.State.UNPLUGGED, s.get("d"));
-		assertEquals(List.of("a", "b"), EffectiveLink.active(ROOM, linkable));
-		assertEquals(-1, EffectiveLink.indexOf(ROOM, linkable, "c"));
-		// netplay needs two linkable players; a Game Boy game never takes part, whatever its ROM hash
-		assertFalse(EffectiveLink.netplay(EffectiveLink.active(ROOM, k -> k.equals("a") || k.equals("c") ? linkable.test(k) : false), k -> "h", k -> true));
-		assertTrue(EffectiveLink.netplay(EffectiveLink.active(ROOM, linkable), k -> "same", k -> true));
+	private static final Map<String, String> SYS = Map.of("a", "gba", "b", "gba", "c", "gbc", "d", "gb");
+
+	private static Map<String, EffectiveLink.State> states(List<String> room, Set<String> open, Map<String, String> sys) {
+		return EffectiveLink.states(room, open::contains, false, sys::get);
 	}
 
 	@Test
-	void onlyGameBoySystemsAreUnsupported() {
-		assertTrue(EffectiveLink.linkSupported(null));
-		assertTrue(EffectiveLink.linkSupported("gba"));
-		assertTrue(EffectiveLink.linkSupported("junk"), "unknown systems count as gba, like PakData");
-		assertFalse(EffectiveLink.linkSupported("gb"));
-		assertFalse(EffectiveLink.linkSupported("GBC"));
+	void aGameBoyPlayerLinksWithGameBoyPlayersAndNeverWithGbaPlayers() {
+		// a, b play GBA, c plays a Game Boy Color game, d a Game Boy game; all four have a session open
+		Map<String, EffectiveLink.State> s = states(ROOM, Set.of("a", "b", "c", "d"), SYS);
+		// two GBA and two Game Boy players tie at two each: the family of the first member in the room (GBA) wins
+		assertEquals(new EffectiveLink.State(0, 2), s.get("a"));
+		assertEquals(new EffectiveLink.State(1, 2), s.get("b"));
+		assertEquals(EffectiveLink.State.UNPLUGGED, s.get("c"));
+		assertEquals(EffectiveLink.State.UNPLUGGED, s.get("d"));
+		// without b the Game Boy pair is the only link: GBC with GB works
+		Map<String, EffectiveLink.State> t = states(ROOM, Set.of("a", "c", "d"), SYS);
+		assertEquals(EffectiveLink.State.UNPLUGGED, t.get("a"));
+		assertEquals(new EffectiveLink.State(0, 2), t.get("c"));
+		assertEquals(new EffectiveLink.State(1, 2), t.get("d"));
+		// a lone Game Boy player next to a lone GBA player: nobody is linked
+		for (EffectiveLink.State st : states(ROOM, Set.of("a", "d"), SYS).values()) assertFalse(st.plugged());
+		assertEquals(List.of("c", "d"), EffectiveLink.active(ROOM, Set.of("a", "c", "d")::contains, SYS::get));
+		assertEquals(1, EffectiveLink.indexOf(ROOM, Set.of("a", "c", "d")::contains, SYS::get, "d"));
+		assertEquals(-1, EffectiveLink.indexOf(ROOM, Set.of("a", "c", "d")::contains, SYS::get, "a"));
+	}
+
+	@Test
+	void theBiggerFamilyWinsAndAGameBoyCableTakesTwo() {
+		Map<String, String> sys = Map.of("a", "gb", "b", "gba", "c", "gba", "d", "gba");
+		assertEquals(List.of("b", "c", "d"), EffectiveLink.active(ROOM, Set.of("a", "b", "c", "d")::contains, sys::get));
+		Map<String, String> gb = Map.of("a", "gb", "b", "gbc", "c", "gb", "d", "gba");
+		assertEquals(List.of("a", "b"), EffectiveLink.active(ROOM, Set.of("a", "b", "c", "d")::contains, gb::get), "three Game Boys: the first two link");
+		var st = states(ROOM, Set.of("a", "b", "c", "d"), gb);
+		assertEquals(EffectiveLink.State.UNPLUGGED, st.get("c"));
+		assertEquals(EffectiveLink.State.UNPLUGGED, st.get("d"));
+		// the old two argument API keeps meaning "everything is a GBA game": up to four players
+		assertEquals(4, EffectiveLink.active(ROOM, Set.of("a", "b", "c", "d")::contains).size());
+	}
+
+	@Test
+	void netplayNeverMixesFamiliesBecauseTheyAreNeverInOneLink() {
+		var active = EffectiveLink.active(ROOM, Set.of("c", "d")::contains, SYS::get);
+		assertFalse(EffectiveLink.netplay(active, k -> k.equals("c") ? "aa" : "bb", k -> true), "GBC + GB with different ROMs: classic");
+		assertTrue(EffectiveLink.netplay(active, k -> "same", k -> true), "the same Game Boy ROM twice: netplay");
+		var st = EffectiveLink.states(ROOM, Set.of("c", "d")::contains, true, SYS::get);
+		assertTrue(st.get("c").netplay() && st.get("d").netplay());
 	}
 }

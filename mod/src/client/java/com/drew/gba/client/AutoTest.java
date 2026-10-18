@@ -1259,10 +1259,11 @@ public final class AutoTest {
 		check(!s.linkTimedOut(), "no link errors");
 		if (a) {
 			check(s.isGameBoy(), "A plays a Game Boy game");
-			check(s.linkStatus().equals(EmulatorSession.GB_LINK_UNSUPPORTED), "A's status line: '" + s.linkStatus() + "'");
-			check(main(ClientCable::stateLine).equals(EmulatorSession.GB_LINK_UNSUPPORTED), "A's cable HUD says why: '" + main(ClientCable::stateLine) + "'");
+			check(s.linkStatus().startsWith("Can't link"), "A's status line: '" + s.linkStatus() + "'");
+			check(main(ClientCable::stateLine).startsWith("Can't link"), "A's cable HUD says why: '" + main(ClientCable::stateLine) + "'");
 		} else {
 			check(!s.isGameBoy(), "B plays a GBA game");
+			check(s.linkStatus().startsWith("Can't link"), "B's status line: '" + s.linkStatus() + "'");
 			check(!s.linkStatus().contains("not responding"), "B has no communication errors: '" + s.linkStatus() + "'");
 		}
 		shot("gb_link_" + (a ? "A" : "B"));
@@ -1413,6 +1414,23 @@ public final class AutoTest {
 			}
 			case "cmd" -> { command(l.substring(4)); sleep(800); }
 			case "gui" -> hideGui(!Boolean.parseBoolean(t[1]));
+			case "gbpoke" -> { // gbpoke <hex addr> <hex byte>...: write Game Boy work RAM C000-CFFF through a state round trip (link serial exerciser ROMs)
+				int addr = Integer.parseInt(t[1], 16);
+				byte[] vals = new byte[t.length - 2];
+				for (int i = 2; i < t.length; i++) vals[i - 2] = (byte) Integer.parseInt(t[i], 16);
+				boolean ok = GbaLinkClient.currentSession().debugRun(c -> {
+					byte[] st = c.saveState();
+					System.arraycopy(vals, 0, st, 0x4400 + addr - 0xC000, vals.length);
+					return c.loadState(st);
+				}).join();
+				log("gbpoke " + (ok ? "ok" : "FAILED"));
+			}
+			case "gblog" -> { // log the serial exerciser's counters: transfers n at C111, first 6 (sent, received) pairs
+				byte[] st = GbaLinkClient.currentSession().debugState().join();
+				StringBuilder sb = new StringBuilder("gblog n=" + (st[0x4400 + 0x111] & 0xFF) + " pairs:");
+				for (int i = 0; i < 6; i++) sb.append(String.format(" %02x/%02x", st[0x4400 + 0x200 + 2 * i] & 0xFF, st[0x4400 + 0x201 + 2 * i] & 0xFF));
+				log(sb.toString());
+			}
 			case "status" -> {
 				EmulatorSession s = GbaLinkClient.currentSession();
 				log("status: screen=" + main(() -> String.valueOf(mc.gui.screen())) + " link='" + (s == null ? "-" : s.linkStatus()) + "' stats='" + (s == null ? "-" : s.linkStatsLine()) + "' toast='" + (s == null ? "" : s.toast()) + "'");

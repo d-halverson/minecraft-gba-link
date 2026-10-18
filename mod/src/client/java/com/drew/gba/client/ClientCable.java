@@ -21,6 +21,7 @@ import java.util.List;
 public final class ClientCable {
 	private static volatile List<String> members = List.of();
 	private static volatile List<Boolean> open = List.of();
+	private static volatile List<String> systems = List.of();
 	private static volatile int myIndex = -1;
 	private static volatile long selfUnlinkAt;
 	/** Dev/test: pretend a cable state (names; index 0 is me) without a server. */
@@ -50,6 +51,7 @@ public final class ClientCable {
 		String wasPartners = partnerText();
 		members = List.copyOf(s.members());
 		open = List.copyOf(s.open());
+		systems = List.of(); // cable_systems follows right behind this packet
 		myIndex = s.members().size() >= 2 ? s.myIndex() : -1;
 		if (linked() && (!was || !wasPartners.equals(partnerText()))) {
 			mc.gui.hud.setOverlayMessage(Component.literal("Linked to " + partnerText()), false);
@@ -58,8 +60,30 @@ public final class ClientCable {
 		}
 	}
 
+	/** Receiver of the optional cable_systems packet (0.5.1): which kind of game each member has open. */
+	public static void onSystems(Payloads.CableSystems s) {
+		systems = List.copyOf(s.systems());
+	}
+
+	/**
+	 * Why the cable cannot link me while I play a {@code mine} ("gba", "gb", "gbc") game: other members play a game of the other
+	 * family (Game Boy and Game Boy Advance games cannot be linked). "" when there is nothing to say.
+	 */
+	public static String mismatchNote(String mine) {
+		List<String> all = members, sys = systems;
+		List<String> names = new ArrayList<>(), kinds = new ArrayList<>();
+		for (int i = 0; i < all.size() && i < sys.size(); i++) {
+			if (i == myIndex) continue;
+			names.add(all.get(i));
+			kinds.add(sys.get(i));
+		}
+		String m = com.drew.gba.server.LinkRules.mismatchMessage(mine, names, kinds);
+		return m == null ? "" : m;
+	}
+
 	/** Join / disconnect: forget the cable. */
 	public static void reset() {
+		systems = List.of();
 		members = List.of();
 		open = List.of();
 		myIndex = -1;

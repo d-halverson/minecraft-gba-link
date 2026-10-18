@@ -73,7 +73,7 @@ class GameBoyCoreTest {
 	@Test
 	void libraryReportsGameBoySupport() {
 		assertTrue(natives.supportsGameBoy());
-		assertEquals(4, natives.apiVersion());
+		assertEquals(5, natives.apiVersion());
 	}
 
 	@Test

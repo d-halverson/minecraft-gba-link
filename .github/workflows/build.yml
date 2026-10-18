@@ -151,7 +151,7 @@ jobs:
           pattern: natives-*
           merge-multiple: true
           path: dist/natives
-      - name: Run the dual-sim hash check (2 and 3 consoles, 3000 frames) and the Game Boy / Game Boy Color hash check (1500 frames), fixed ROMs and inputs, virtual RTC
+      - name: Run the dual-sim hash check (2 and 3 consoles, 3000 frames), the Game Boy / Game Boy Color hash check (1500 frames) and the linked Game Boy pair hash check (1000 frames, with a reload), fixed ROMs and inputs, virtual RTC
         shell: bash
         run: |
           set -e

@@ -13,5 +13,8 @@ int      gba_priv_link_waiting(gba_core* c);
 int64_t  gba_priv_rtc_unix(gba_core* c);
 
 int gba_priv_group_round(gba_group* g);
+/* scheduler rounds the last gba_group_run_frame needed (a quiet frame needs a few hundred) */
+long gba_priv_group_rounds(gba_group* g);
+void gba_priv_set_round_limit(long n);
 
 #endif

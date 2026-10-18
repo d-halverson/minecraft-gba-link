@@ -33,6 +33,11 @@ public final class Payloads {
 		public static final int CAP_NETPLAY_LOCKSTEP = 2;
 		/** 0.5.0: this client's native library can run Game Boy and Game Boy Color games (native API 4). */
 		public static final int CAP_GAMEBOY = 4;
+		/**
+		 * 0.5.1: Game Boy / Game Boy Color games can use the link cable (native API 5: lockstep groups and the classic byte link
+		 * for Game Boy cores). The server leaves a Game Boy game of a client without this bit out of the link.
+		 */
+		public static final int CAP_GAMEBOY_LINK = 8;
 		public static final Type<Hello> TYPE = mkType("hello");
 		public static final StreamCodec<RegistryFriendlyByteBuf, Hello> CODEC = StreamCodec.ofMember(
 			(v, b) -> { b.writeVarInt(v.protocol); b.writeVarInt(v.caps); },
@@ -170,6 +175,25 @@ public final class Payloads {
 				return new CableState(idx, names, open);
 			});
 		public static final CableState NONE = new CableState(-1, List.of(), List.of());
+		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+	}
+
+	/**
+	 * S2C (optional, additive, 0.5.1; only sent to clients that registered it): the system ("gba", "gb", "gbc", or "" when no
+	 * game is open) of every member of the cable, in the order of the preceding cable_state. Lets the HUD say why a link
+	 * cannot start (Game Boy and Game Boy Advance games cannot be linked).
+	 */
+	public record CableSystems(List<String> systems) implements CustomPacketPayload {
+		public static final Type<CableSystems> TYPE = mkType("cable_systems");
+		public static final StreamCodec<RegistryFriendlyByteBuf, CableSystems> CODEC = StreamCodec.ofMember(
+			(v, b) -> { b.writeVarInt(v.systems.size()); for (String s : v.systems) b.writeUtf(s, 8); },
+			b -> {
+				int n = b.readVarInt();
+				if (n < 0 || n > 8) throw new IllegalArgumentException("bad member count");
+				List<String> l = new ArrayList<>(n);
+				for (int i = 0; i < n; i++) l.add(b.readUtf(8));
+				return new CableSystems(l);
+			});
 		@Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
 	}
 
@@ -424,6 +448,7 @@ public final class Payloads {
 		s2c.register(NetplayHashS2C.TYPE, NetplayHashS2C.CODEC);
 		s2c.register(NetplaySnapshotS2C.TYPE, NetplaySnapshotS2C.CODEC);
 		s2c.register(CableState.TYPE, CableState.CODEC);
+		s2c.register(CableSystems.TYPE, CableSystems.CODEC);
 		s2c.register(CrtVolume.TYPE, CrtVolume.CODEC);
 		s2c.register(CrtAudioRange.TYPE, CrtAudioRange.CODEC);
 	}

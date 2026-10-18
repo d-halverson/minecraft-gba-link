@@ -4,11 +4,13 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 import java.util.function.Predicate;
 
 /**
  * The link the clients actually see: only room members with an open emulator take part, indexed
- * 0..n-1 in room join order. Fewer than two active members means nobody is plugged in.
+ * 0..n-1 in room join order, and only members whose games can share a cable ({@link LinkRules}). Fewer than two
+ * active members means nobody is plugged in.
  */
 public final class EffectiveLink {
 	private EffectiveLink() {}
@@ -20,20 +22,20 @@ public final class EffectiveLink {
 		public boolean plugged() { return count >= 2; }
 	}
 
-	/**
-	 * Whether a game of this system ({@code gba}, {@code gb}, {@code gbc}; null = gba) can use the link cable.
-	 * Game Boy and Game Boy Color games cannot yet (0.5.0); their players are left out of the link like players with
-	 * no game open, without affecting the others.
-	 */
-	public static boolean linkSupported(String system) {
-		return !PakData.isGameBoy(system);
+	/** Active members in room order, or empty if fewer than two are active (every game counts as a Game Boy Advance game). */
+	public static <K> List<K> active(List<K> room, Predicate<K> open) {
+		return active(room, open, k -> null);
 	}
 
-	/** Active members in room order, or empty if fewer than two are active. */
-	public static <K> List<K> active(List<K> room, Predicate<K> open) {
+	/**
+	 * Active members: those with a game open that can link ({@code open}), reduced to the ones that can share a cable
+	 * ({@link LinkRules#select}: GBA with GBA, Game Boy / Color with Game Boy / Color, two at most). Empty if fewer than two.
+	 */
+	public static <K> List<K> active(List<K> room, Predicate<K> open, Function<K, String> system) {
 		List<K> a = new ArrayList<>();
 		for (K k : room) if (open.test(k)) a.add(k);
-		return a.size() >= 2 ? a : List.of();
+		List<K> sel = LinkRules.select(a, system);
+		return sel.size() >= 2 ? sel : List.of();
 	}
 
 	/** Effective state of every room member (inactive members and small groups are UNPLUGGED). */
@@ -42,7 +44,11 @@ public final class EffectiveLink {
 	}
 
 	public static <K> Map<K, State> states(List<K> room, Predicate<K> open, boolean netplay) {
-		List<K> a = active(room, open);
+		return states(room, open, netplay, k -> null);
+	}
+
+	public static <K> Map<K, State> states(List<K> room, Predicate<K> open, boolean netplay, Function<K, String> system) {
+		List<K> a = active(room, open, system);
 		Map<K, State> m = new LinkedHashMap<>();
 		for (K k : room) {
 			int i = a.indexOf(k);
@@ -70,5 +76,9 @@ public final class EffectiveLink {
 	/** Effective index of a member, or -1 if it is not part of an effective link. */
 	public static <K> int indexOf(List<K> room, Predicate<K> open, K member) {
 		return active(room, open).indexOf(member);
+	}
+
+	public static <K> int indexOf(List<K> room, Predicate<K> open, Function<K, String> system, K member) {
+		return active(room, open, system).indexOf(member);
 	}
 }

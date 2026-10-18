@@ -46,8 +46,8 @@ public final class EmulatorSession implements Runnable {
 		}
 	}
 
-	/** Shown while cabled with a Game Boy / Game Boy Color game open (phase 1: no link cable for those games yet). */
-	public static final String GB_LINK_UNSUPPORTED = "Link cable for Game Boy games isn't supported yet";
+	/** Shown while cabled with a Game Boy / Game Boy Color game open and a native library older than API 5 (no Game Boy link). */
+	public static final String GB_LINK_NEEDS_UPDATE = "Game Boy link needs a newer emulator library - update the mod";
 
 	public final UUID pakId;
 	public final String title;
@@ -91,6 +91,8 @@ public final class EmulatorSession implements Runnable {
 	private volatile int lastLinkMode;
 	/** Shown once each time a link falls back to the classic (lockstep) mode. */
 	static final String CLASSIC_WARNING = "Different games: slow link, may fail over the internet. Use the same ROM for full speed.";
+	/** Game Boy: every transferred byte costs a network round trip, so the link is much slower than a real cable. */
+	static final String CLASSIC_WARNING_GB = "Different games: every link byte waits for the network (slow, may fail online). Use the same ROM for full speed.";
 	private volatile boolean classicWarned;
 	private volatile boolean netplayExpected, netplayActive;
 	private long lastSaveNanos;
@@ -129,6 +131,9 @@ public final class EmulatorSession implements Runnable {
 
 	/** {@code gba}, {@code gb} or {@code gbc}. */
 	public String system() { return system; }
+
+	/** A Game Boy game with a native library that cannot link Game Boy cores (API 4): the cable is ignored. */
+	private boolean gbLinkUnavailable() { return isGameBoy() && !natives.supportsGameBoyLink(); }
 
 	/** True for Game Boy and Game Boy Color games. */
 	public boolean isGameBoy() { return !"gba".equals(system); }
@@ -244,7 +249,7 @@ public final class EmulatorSession implements Runnable {
 
 	/** link_state from the server. mode NETPLAY: the cable is handled by NetplayController once netplay_start arrives. */
 	public void onLinkState(int index, int count, List<String> names, int mode) {
-		if (isGameBoy()) { // no link cable for Game Boy games yet: always unplugged, whatever the server says
+		if (gbLinkUnavailable()) { // an old native library cannot link Game Boy games: always unplugged, whatever the server says
 			index = 0;
 			count = 0;
 			names = List.of();
@@ -254,7 +259,7 @@ public final class EmulatorSession implements Runnable {
 		final List<String> fNames = names;
 		final int fMode = mode;
 		boolean classicNow = mode != Payloads.LinkState.MODE_NETPLAY && count >= 2;
-		if (classicNow && !classicWarned) toast(CLASSIC_WARNING, 8000);
+		if (classicNow && !classicWarned) toast(isGameBoy() ? CLASSIC_WARNING_GB : CLASSIC_WARNING, 8000);
 		classicWarned = classicNow;
 		lastLinkMode = mode;
 		netplayExpected = mode == Payloads.LinkState.MODE_NETPLAY && count >= 2;
@@ -270,7 +275,7 @@ public final class EmulatorSession implements Runnable {
 
 	/** netplay_start from the server: a (new) netplay session for this client. */
 	public void onNetplayStart(NetplayEngine.Params p) {
-		if (isGameBoy()) return; // never expected (the server leaves Game Boy games out of the link)
+		if (gbLinkUnavailable()) return; // never expected (the server leaves such a session out of the link)
 		commands.add(() -> {
 			if (core == null) return;
 			link.apply(0, 0, List.of());
@@ -346,7 +351,7 @@ public final class EmulatorSession implements Runnable {
 	 * {@code classic link (different games)}, {@code connecting…}, or "" when the cable is not (yet) effectively linked.
 	 */
 	public String linkHudState() {
-		if (isGameBoy()) return com.drew.gba.client.ClientCable.linked() ? GB_LINK_UNSUPPORTED : "";
+		if (gbLinkUnavailable()) return com.drew.gba.client.ClientCable.linked() ? GB_LINK_NEEDS_UPDATE : "";
 		if (netplayActive) {
 			String st = netplay.statsLine();
 			java.util.regex.Matcher fps = java.util.regex.Pattern.compile("([0-9.]+) fps").matcher(st);
@@ -356,17 +361,20 @@ public final class EmulatorSession implements Runnable {
 		}
 		if (netplayExpected) return "connecting\u2026";
 		if (link.timedOut()) return "partner not responding";
-		if (link.count() < 2) return "";
+		if (link.count() < 2) return com.drew.gba.client.ClientCable.linked() ? com.drew.gba.client.ClientCable.mismatchNote(system) : "";
 		return lastLinkMode == Payloads.LinkState.MODE_NETPLAY ? "linked" : "classic link (different games)";
 	}
 
 	public String linkStatus() {
-		if (isGameBoy()) return com.drew.gba.client.ClientCable.linked() ? GB_LINK_UNSUPPORTED : "Link: not connected";
+		if (gbLinkUnavailable()) return com.drew.gba.client.ClientCable.linked() ? GB_LINK_NEEDS_UPDATE : "Link: not connected";
 		if (netplayActive) return netplay.statusLine();
 		if (netplayExpected) return "Connecting link...";
 		int c = link.count(), i = link.index();
 		if (link.timedOut()) return "Link: partner not responding - cable unplugged";
-		if (c < 2) return "Link: not connected";
+		if (c < 2) {
+			String why = com.drew.gba.client.ClientCable.linked() ? com.drew.gba.client.ClientCable.mismatchNote(system) : "";
+			return why.isEmpty() ? "Link: not connected" : why;
+		}
 		String names = String.join(", ", link.names());
 		String head = lastLinkMode == Payloads.LinkState.MODE_NETPLAY ? "Link" : "Link (different games \u2014 slow, may fail online)";
 		return (link.waiting() ? head + ": waiting for partner... " : head + ": ") + "P" + (i + 1) + " of " + c + " - " + names;
@@ -417,7 +425,7 @@ public final class EmulatorSession implements Runnable {
 					? "The emulator library cannot run Game Boy games - update the GBA Link mod"
 					: romPath.getFileName() + " is not a GBA game");
 			}
-			if (isGameBoy() && com.drew.gba.client.ClientCable.linked()) toast(GB_LINK_UNSUPPORTED, 6000);
+			if (gbLinkUnavailable() && com.drew.gba.client.ClientCable.linked()) toast(GB_LINK_NEEDS_UPDATE, 6000);
 			if (initialSave != null && initialSave.length > 0) {
 				if (core.loadSave(initialSave) < 0) LOG.warn("Core rejected save for pak {}", pakId);
 				else LOG.info("Loaded {} byte save for pak {}", initialSave.length, pakId);

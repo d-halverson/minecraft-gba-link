@@ -1,7 +1,7 @@
 # gbacore - native GBA / Game Boy / Game Boy Color emulator library
 
 `libgbacore` wraps **mGBA 0.10.5** (the GBA and the Game Boy / Game Boy Color cores, built statically into the library)
-behind the C ABI in `include/gbacore.h` (contract: `../SPEC.md`, API version 4) and adds a serial-level
+behind the C ABI in `include/gbacore.h` (contract: `../SPEC.md`, API version 5) and adds a serial-level
 **GBA link cable** that works across processes: the host only forwards opaque byte messages.
 
 ## Build
@@ -100,6 +100,17 @@ picture size (160x144); the framebuffer format is the same RGBA bytes.
   virtual RTC, platform switching, refusal of link / group calls), `determinism_gb`, and the manual harness `gb_harness` (screenshots of any ROM). The
   ROMs are written by `tests/make_gb_rom.py` (hand assembled LR35902: tile graphics, text, a 440 Hz tone, MBC3+RTC / MBC5 battery RAM,
   joypad reads); `gb_rom_in_sync_*` checks that the copies the Java tests use (`mod/src/test/resources/roms`) are what the generator writes.
+
+## Game Boy link (API version 5)
+
+`gba_link_*` and `gba_group_*` accept Game Boy / Game Boy Color cores (exactly two per cable or group, one platform per group). Two
+implementations, chosen by the host like for GBA: **lockstep groups** (same ROM, netplay) use mGBA's `GBSIOLockstep` with the callbacks
+of `gbacore.c` ("Game Boy groups"), **classic link** (different ROMs) a `GBSIODriver` that exchanges one byte per transfer through the opaque
+messages (`GBM_START` / `GBM_REPLY`). Details, the halted-console fix and the measured behaviour: `../SPEC.md` "Game Boy link (0.5.1)".
+
+Tests: `gblink` (both modes, `tests/make_gb_link_rom.py` serial exerciser ROMs), `determinism_gblink`. Manual tools: `gb_harness`
+(`stateIn` / `stateOut` / `poke` / `watch`), `gb_pair_harness` (two real cartridges linked in one process: `mode=group` or
+`mode=classic latency=N`, per player scripts, screenshots). Never copy a commercial ROM anywhere.
 
 ## Virtual RTC (API version 2)
 

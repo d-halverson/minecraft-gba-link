@@ -32,7 +32,7 @@ public final class GbaNative {
 	/** gba_platform() values. */
 	public static final int PLATFORM_GBA = 0, PLATFORM_GB = 1;
 	public static final int RUN_FRAME_DONE = 0, RUN_LINK_WAIT = 1, RUN_ERROR = -1;
-	public static final int API_VERSION = 4, MIN_API_VERSION = 1, RTC_WALL = 0, RTC_VIRTUAL = 1;
+	public static final int API_VERSION = 5, MIN_API_VERSION = 1, RTC_WALL = 0, RTC_VIRTUAL = 1;
 
 	private static GbaNative instance;
 	private static String loadError;
@@ -83,6 +83,12 @@ public final class GbaNative {
 
 	/** True if the library can run Game Boy and Game Boy Color games (API 4). An older library loads GBA ROMs only. */
 	public boolean supportsGameBoy() { return platform != null; }
+
+	/**
+	 * True if Game Boy / Game Boy Color cores can use the link cable (API 5): lockstep groups for same-ROM netplay and the classic
+	 * byte link for different ROMs. An API 4 library runs Game Boy games single player only.
+	 */
+	public boolean supportsGameBoyLink() { return version >= 5 && platform != null; }
 
 	/** The library's API version. */
 	public int apiVersion() { return version; }

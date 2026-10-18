@@ -17,6 +17,11 @@ import java.util.zip.CRC32;
  * Game Boy / Game Boy Color determinism check: one core per ROM, scripted keys, virtual RTC, 1500 frames, CRC32 of the complete
  * save state and the framebuffer at frames 100, 1000 and 1500 (the same numbers native/tests/test_determinism_gb.c pins).
  *
+ * With a gbRomDir that also holds gblink_auto.gb (the serial exerciser, native/tests/make_gb_link_rom.py) it runs two linked Game Boy
+ * consoles in one {@link NetplaySim} (GBSIOLockstep, native API 5) with the same scripted keys as test_determinism_gblink.c: the
+ * "gblink" lines must equal that test's pinned values, and every platform must print the same text; a second run reloads fresh cores
+ * from a snapshot of both consoles at frame 500 ("gblink-reload").
+ *
  * usage: NetplayHashCheck &lt;gameDir with gbalink/natives/&lt;platform&gt;/lib&gt; &lt;rom.gba&gt; [outFile [gbRomDir]]
  */
 public final class NetplayHashCheck {
@@ -118,6 +123,37 @@ public final class NetplayHashCheck {
 		return out.toString();
 	}
 
+	/** Two linked Game Boy consoles, 1000 frames; checks at 100, 500 and 1000. {@code reload}: fresh cores from a snapshot at frame 500. */
+	static String runGameBoyLink(GbaNative n, Path rom, boolean reload) {
+		StringBuilder out = new StringBuilder();
+		String tag = reload ? "gblink-reload" : "gblink";
+		NetplaySim sim = new NetplaySim(fresh(n, rom, 2, EPOCH, null, null), 0);
+		int[] keys = new int[2];
+		byte[] fb = new byte[160 * 144 * 4];
+		int[] checks = {100, 500, 1000};
+		for (int f = 0; f < 1000; f++) {
+			for (int i = 0; i < 2; i++) keys[i] = script(i, f);
+			if (!sim.tick(keys)) throw new IllegalStateException("core error");
+			if (reload && f + 1 == 500) {
+				byte[][] st = new byte[2][], sv = new byte[2][];
+				for (int i = 0; i < 2; i++) { st[i] = sim.core(i).saveState(); sv[i] = sim.core(i).getSave(); }
+				NetplaySim reloaded = new NetplaySim(fresh(n, rom, 2, EPOCH + (long) 500 * 280896L / 16777216L, st, sv), 0);
+				sim.close();
+				sim = reloaded;
+			}
+			for (int c : checks) {
+				if (f + 1 != c) continue;
+				StringBuilder sb = new StringBuilder(tag).append(" f=").append(c).append(" states=").append(String.format("%08x", sim.hashAll() & 0xFFFFFFFFL));
+				CRC32 all = new CRC32();
+				for (int i = 0; i < 2; i++) { sim.core(i).copyFramebuffer(fb); all.update(fb, 0, 160 * 144 * 4); }
+				sb.append(" frames=").append(String.format("%08x", all.getValue()));
+				out.append(sb).append('\n');
+			}
+		}
+		sim.close();
+		return out.toString();
+	}
+
 	public static void main(String[] a) throws Exception {
 		Path gameDir = Path.of(a[0]);
 		GbaNative n = GbaNative.get(gameDir);
@@ -133,6 +169,12 @@ public final class NetplayHashCheck {
 			sb.append("gb api ").append(n.apiVersion()).append('\n');
 			sb.append(runGameBoy(n, Path.of(a[3], "gb_dmg.gb")));
 			sb.append(runGameBoy(n, Path.of(a[3], "gb_cgb.gbc")));
+			Path link = Path.of(a[3], "gblink_auto.gb");
+			if (Files.isRegularFile(link)) {
+				if (!n.supportsGameBoyLink()) throw new IllegalStateException("native library without Game Boy link support (API 5)");
+				sb.append(runGameBoyLink(n, link, false));
+				sb.append(runGameBoyLink(n, link, true));
+			}
 		}
 		if (a.length > 2) Files.writeString(Path.of(a[2]), sb.toString());
 		System.out.print(sb);

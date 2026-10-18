@@ -209,7 +209,7 @@ static void test_save_state(const char* dir, const char* name, size_t saveSize) 
 	run(c, 40, 0);
 	CHECK(fbhash(c) == h1 && statehash(c) == sh1, "same-core replay identical");
 	CHECK(gba_load_state(c, st, sn - 1) < 0, "short state rejected");
-	CHECK(gba_load_state(c, st, sn + 128) < 0, "state with a group trailer rejected for Game Boy");
+	CHECK(gba_load_state(c, st, sn + 1) < 0, "state with a stray extra byte rejected");
 	/* reset restarts the program but the battery RAM stays */
 	gba_reset(c);
 	run(c, 12, 0);
@@ -290,7 +290,7 @@ static void test_link_refusal(const char* dir) {
 	CHECK(gba_link_poll_outgoing(c, m, sizeof(m)) == 0, "no outgoing link message from a Game Boy core");
 	gba_group* g = gba_group_create(2);
 	CHECK(g != NULL, "group create");
-	CHECK(gba_group_add(g, c) < 0, "group_add refuses a Game Boy core");
+	CHECK(gba_group_add(g, c) == 0, "a Game Boy core can join a group (API 5)");
 	gba_group_destroy(g);
 	run(c, 10, 0);
 	gba_destroy(c);
@@ -321,7 +321,7 @@ int main(int argc, char** argv) {
 	if (argc < 3) return 2;
 	const char* dir = argv[1];
 	printf("api version %u\n", gba_api_version());
-	CHECK(gba_api_version() == 4, "api version");
+	CHECK(gba_api_version() == 5, "api version");
 	test_common(dir, "gb_dmg.gb", 0, 8192 + 48, "GBTESTDMG", "G332");
 	test_common(dir, "gb_cgb.gbc", 1, 8192, "GBTESTCGB", "GBCT");
 	test_save_state(dir, "gb_dmg.gb", 8192 + 48);

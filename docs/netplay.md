@@ -1,6 +1,6 @@
 # Netplay link (0.4.0, lockstep since 0.4.2)
 
-Linked games run at full speed over the internet when everybody has a Game Pak with the **same game**.
+Linked games run at full speed over the internet when everybody has a Game Pak with the **same game** (GBA, Game Boy and Game Boy Color alike).
 
 ## What you see
 
@@ -31,10 +31,12 @@ consoles are sent to everyone to repair it.
 
 ## Limits
 
-* Up to 4 players. Each client emulates all of them: 4 players cost about 4x the CPU of one (about 1 ms per frame on a laptop
+* Game Boy / Game Boy Color: exactly 2 players (a Game Boy cable joins two consoles), linked by mGBA's `GBSIOLockstep`; a Game Boy
+  game and a GBA game never link. Different Game Boy ROMs use a byte-by-byte classic link (one network round trip per byte).
+* Up to 4 players (GBA). Each client emulates all of them: 4 players cost about 4x the CPU of one (about 1 ms per frame on a laptop
   for a light game).
 * Only your own console's save is uploaded to the server.
 * The cartridge clock shows the server's local time while linked (it is virtual and advances with emulated time).
-* Netplay needs the native library of this version (API 3); the mod ships it. Players on 0.4.1 or older cannot join netplay with 0.4.2 players (the link is then classic).
+* Netplay needs the native library of this version (API 3; API 5 for Game Boy games); the mod ships it. Players on 0.4.1 or older cannot join netplay with 0.4.2 players (the link is then classic).
 * mGBA's link code only models Normal-mode (Game Boy style) cables loosely: the master reads 0xFFFFFFFF back. Multiplayer mode (Pokemon, most GBA games) is complete.
 * `-Dgbalink.relaydelay=25` on a dev server adds 25 ms to every relayed packet, to test with a bad connection.

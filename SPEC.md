@@ -45,7 +45,7 @@ typedef struct gba_core gba_core;
                                   to continue the SAME frame */
 #define GBA_RUN_ERROR     -1
 
-uint32_t    gba_api_version(void);              /* returns 4 for this spec (3 = GBA only, 2 = no groups, 1 = without gba_set_rtc) */
+uint32_t    gba_api_version(void);              /* returns 5 for this spec (4 = Game Boy without link, 3 = GBA only, 2 = no groups, 1 = without gba_set_rtc) */
 gba_core*   gba_create(void);
 void        gba_destroy(gba_core*);
 
@@ -90,13 +90,14 @@ size_t      gba_state_size(gba_core*);
 size_t      gba_save_state(gba_core*, uint8_t* out, size_t cap);
 int         gba_load_state(gba_core*, const uint8_t* data, size_t len);
 
-/* ---- Link cable (GBA only) ----
-   A Game Boy core has no link support yet: gba_link_configure and gba_link_deliver are ignored, gba_link_poll_outgoing
-   returns 0 and gba_group_add fails (-1); check gba_platform() first.
+/* ---- Link cable ----
    Messages are OPAQUE to Java and the server: Java only forwards bytes between cores.
-   player_index: 0 = parent/master, 1..3 = children. player_count < 2 = cable unplugged.
+   GBA: player_index: 0 = parent/master, 1..3 = children. player_count < 2 = cable unplugged.
+   Game Boy / Game Boy Color (API version 5, classic link for different ROMs): exactly two consoles, player_index 0 or 1,
+   player_count 2 (any other count unplugs); no master by index: whichever console starts a transfer (SC = 0x81) is the master.
+   Game Boy and GBA cores are never linked to each other (the server never routes between them).
    Changing configuration while GBA_RUN_LINK_WAIT is pending must unblock the core
-   (pending transfer completes as if no partner: 0xFFFF / 0xFFFFFFFF). */
+   (pending transfer completes as if no partner: 0xFFFF / 0xFFFFFFFF, Game Boy: 0xFF). */
 void        gba_link_configure(gba_core*, int player_index, int player_count);
 /* Pop one outgoing message; returns its length (1..GBA_LINK_MSG_MAX), 0 if none. */
 size_t      gba_link_poll_outgoing(gba_core*, uint8_t* out, size_t cap);
@@ -116,7 +117,9 @@ int         gba_set_rtc(gba_core*, int64_t epoch_seconds, int mode);
    order (deterministic, no messages, no LINK_WAIT). gba_group_create(n), gba_group_add(group, core) in player order
    (ROM/save/state/RTC loaded first), gba_group_run_frame(group) = one frame for every core (each core's framebuffer
    holds its completed frame), gba_group_destroy (cores get their classic driver back), gba_group_stalls (diagnostic).
-   A grouped core cannot gba_run_frame; its states carry a 128 byte lockstep trailer. See native/README.md. */
+   A grouped core cannot gba_run_frame; its states carry a 128 byte lockstep trailer. See native/README.md.
+   API 5: Game Boy / Color cores can join a group (2 per group, one platform per group; mGBA's GBSIOLockstep, the master role goes to
+   the console that starts a transfer), gba_group_add fails (-1) for a core of another platform than the group's. */
 ```
 
 Link semantics (implemented in the shim, invisible to Java): lockstep at the serial-transfer
@@ -145,13 +148,13 @@ Only sent to clients where `ServerPlayNetworking.canSend` is true. Vanilla / non
 clients must be able to join and see the items (no new synced registry entries, no custom
 command argument types).
 
-Protocol number: **4** (0.4.0; 3 was 0.3.0, 2 was 0.2.0). 0.5.0 (Game Boy support) stays on 4: it only appends optional fields. Hello/Welcome carry it; mismatches never crash: the server refuses to `open`
+Protocol number: **4** (0.4.0; 3 was 0.3.0, 2 was 0.2.0). 0.5.0 (Game Boy support) and 0.5.1 (Game Boy link) stay on 4: they only append optional fields and optional packets. Hello/Welcome carry it; mismatches never crash: the server refuses to `open`
 for a client with a different protocol ("update the mod"), and a client treats a server that sends no `welcome`
 (protocol 1) as unable to do revisions/imports and shows "update the mod". New fields are appended last and
 decoded tolerantly.
 
 - C2S `hello` {protocol, caps} — client announces the mod and its protocol. `caps` (new in 0.4.0, appended; 0 if absent)
-  is a bit set: bit 0 = netplay with the 0.4.0/0.4.1 link driver (native API 2, no longer used for new sessions), bit 1 (`CAP_NETPLAY_LOCKSTEP`, 0.4.2) = the client can run netplay with mGBA lockstep groups (native API version 3), bit 2 (`CAP_GAMEBOY`, 0.5.0) = the client's native library can run Game Boy / Game Boy Color games (API 4).
+  is a bit set: bit 0 = netplay with the 0.4.0/0.4.1 link driver (native API 2, no longer used for new sessions), bit 1 (`CAP_NETPLAY_LOCKSTEP`, 0.4.2) = the client can run netplay with mGBA lockstep groups (native API version 3), bit 2 (`CAP_GAMEBOY`, 0.5.0) = the client's native library can run Game Boy / Game Boy Color games (API 4), bit 3 (`CAP_GAMEBOY_LINK`, 0.5.1) = it can also link them (API 5: lockstep groups and the classic byte link for Game Boy cores).
 - S2C `welcome` {protocol} — server's protocol (new in 2; only sent if the client can receive it).
 - S2C `open` {pakId UUID, romSha1 hex, title, save bytes, revision} — open emulator for this pak.
   `revision` (new in 2, appended; "" if absent) = lowercase hex SHA-256 of `save` (a missing save is the hash
@@ -180,6 +183,10 @@ decoded tolerantly.
   it (protocol 4 clients without it are unaffected). Who is on my link cable even with no GBA open (`open` = that member
   has a GBA/CRT running); count 0 / myIndex -1 = not cabled. Sent on every room change or session change in the room, on
   Hello (join) and after respawn. Drives the client's cable HUD indicator.
+- S2C `cable_systems` {systems[]} — **optional, additive (0.5.1)**: only sent to clients that registered it (an older client never sees it):
+  the system (`gba`, `gb`, `gbc`, or "" = no game open) of each member of the preceding `cable_state`. The client HUD uses it to say
+  why a link cannot start ("Can't link: X plays a Game Boy Advance game, you play a Game Boy / Color game"); older clients get the same
+  text as an action bar message.
 - C2S `unlink` {} — **optional (0.4.2)**: take me off the cable (same as `/gba unlink`); the other members get the action
   bar message "<name> unplugged the link cable."
 - C2S `link_data` {bytes ≤ 64} → server → S2C `link_data` {fromIndex, bytes} to other members.
@@ -223,10 +230,44 @@ into the library next to the GBA core (`gba_*` API above, version 4; no new depe
 * **CRT / spectators.** The TV texture and the spectator stream stay 240x160 so the codec, the decoders and every viewer are unchanged:
   `FrameBuffer.copyLetterboxed` centres the 160x144 picture 1:1 on the canvas with opaque black borders (40 px left and right, 8 px above and below),
   which is the right aspect on the 3:2 quad and sits pillarboxed in the 4:3 tube. Audio paths are unchanged.
-* **Link cable: not yet.** Game Boy sessions do not take part in the link: the server leaves a Game Boy session out of the effective link
-  (`GbaServer.linkable`, `EffectiveLink.linkSupported`), so it is unplugged, never routes link data and never starts netplay (the others keep
-  linking among themselves), and the client shows "Link cable for Game Boy games isn't supported yet" (status line, cable HUD and a toast). Phase 2
-  will add GB link; nothing in the group / link API assumes GBA only (cores refuse cleanly by platform).
+* **Link cable (0.5.1).** The same Game Link Cable item and flow as for GBA; see "Game Boy link (0.5.1)" below.
+
+## Game Boy link (0.5.1)
+
+**Who links with whom** (`com.drew.gba.server.LinkRules`, used by the server and the client HUD; unit tested): GBA with GBA (2 to 4),
+Game Boy / Game Boy Color with Game Boy / Game Boy Color (GB with GB, GBC with GBC, GB with GBC; 2 players, a Game Boy cable joins two
+consoles); a Game Boy game never links with a GBA game. `EffectiveLink.active(room, open, systemOf)` takes the room's members with a game open
+that their client can link (a Game Boy game needs `CAP_GAMEBOY_LINK`) and keeps the biggest group of one family with at least two members (a
+tie goes to the family whose first member is first in the room), cut to the family's maximum. Everybody else is left out without breaking
+anything: they keep their game and get a message once per change (action bar for every client, the HUD / status line text from
+`cable_systems` for new clients; "a Game Boy cable joins two players", "Your emulator library is too old for Game Boy links",
+"X's mod is too old ..."). Mode selection (netplay for the same ROM in every pak and capable clients, else classic) is unchanged.
+
+**Netplay (same ROM, native `gba_group_*`).** `NetplayEngine` / `NetplaySim` are platform agnostic; only the native layer differs. Game Boy
+group (`gbacore.c`, "Game Boy groups"): mGBA's `GBSIOLockstep` (`src/gb/sio/lockstep.c`) with `mLockstep` callbacks that mirror
+`MultiplayerController.cpp`, stepped round-robin on the calling thread. Differences from GBA: the lockstep numbers its nodes by role
+(id 0 = the console that started the transfer), our bookkeeping is by console (`gbCoreOf`); a joining core's armed `SB` byte is taken over
+(the lockstep only sees `SB` writes made while attached); a Game Boy state holds no serial state at all, so the 128 byte trailer
+(`GLK2`) carries the lockstep phase, node fields, the master order and the SIO unit's own `remainingBits` / `period` / event; the
+master role is whoever clocks first (collisions: the second clock is ignored, like hardware). A sleeping node (the core may not run on
+until its partner posted cycles) asks the core to leave its event loop with `earlyExit` and reschedules itself one cycle later; a HALTed
+Game Boy (every Pokemon frame) does not leave `GBProcessEvents` at an `earlyExit` and one cycle steps never advance its instruction
+state, so the shim wraps the node's event and pushes it 8 cycles further when the node went to sleep (found with real Pokemon Red:
+without it a group frame never finished). `test_determinism_gblink` pins CRCs of both consoles' states.
+
+**Classic link (different ROMs, `gba_link_*` on a Game Boy core).** A GBSIODriver, messages `[0x10][src][seq][byte][0]` (START, master to
+peer) and `[0x11][src][seq][byte][valid]` (REPLY). The master writing `SC = 0x81` cancels mGBA's own "nobody there" completion, queues a
+START and the core returns `GBA_RUN_LINK_WAIT` (emulated time stands still) until the REPLY arrives, then shifts the reply in over the
+normal 4096 cycles (or 16 with the CGB fast clock) and raises its SIO interrupt. The other console answers on arrival with the `SB` it has
+armed (`SC = 0x80`) and shifts the master's byte in; a START that finds it unarmed is held up to 8 frames (answered the moment the game
+arms the port), then answered with an invalid reply (0xFF); both consoles clocking at once get 0xFF each. Unplugging unblocks a waiting
+master with 0xFF. Cost: one network round trip per byte for the master (the other console runs free); the game's own timeouts decide how
+much latency it tolerates (measured, see README). Everything else (LinkPump, status line "Link (different games - slow, may fail online)",
+5 s partner timeout) is the GBA classic path.
+
+**Compatibility.** An API 4 native library (a stale file in `gbalink/natives`) does not announce `CAP_GAMEBOY_LINK`: its Game Boy sessions
+are left out of the link by the server and the client says "Game Boy link needs a newer emulator library - update the mod". Everything
+else is unchanged for GBA.
 
 ## Netplay link (0.4.0, protocol 4)
 
