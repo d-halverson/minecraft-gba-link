@@ -45,8 +45,8 @@ public final class CrtScreen extends Screen {
 	private final SessionControls controls;
 	private final List<AbstractWidget> panelWidgets = new ArrayList<>();
 	private Button optionsButton, escButton;
-	/** The pause menu (Esc) is open: keys are not forwarded to the game; "Pause" mode also freezes the emulation. */
-	private boolean menuOpen;
+	/** Set when the server ended the play: leaving then stops the session instead of leaving it behind the TV. */
+	private boolean forced;
 	private int panelX, panelY, panelH;
 	private int switchCx, switchCy;
 
@@ -66,8 +66,15 @@ public final class CrtScreen extends Screen {
 	/** The server ended our play (TV broken, walked away): leave the screen. */
 	public static void serverEnded(UUID crtId) {
 		CrtScreen s = open;
-		if (s != null && s.crtId.equals(crtId) && s.minecraft != null) s.minecraft.execute(() -> {
+		if (s == null) { // the screen was left earlier: the game is only kept alive behind the TV
+			net.minecraft.client.Minecraft.getInstance().execute(() -> {
+				if (crtId.equals(com.drew.gba.client.crt.CrtDetached.crtId())) com.drew.gba.client.crt.CrtDetached.endNow(null);
+			});
+			return;
+		}
+		if (s.crtId.equals(crtId) && s.minecraft != null) s.minecraft.execute(() -> {
 			s.childOpen = false;
+			s.forced = true;
 			if (s.minecraft.gui.screen() != s) { s.removed(); s.minecraft.gui.setScreen(null); } // an import screen is on top
 			else s.closeNow(); // forced: no confirmation
 		});
@@ -95,10 +102,9 @@ public final class CrtScreen extends Screen {
 			com.drew.gba.client.ClientConfig.setEscMode(com.drew.gba.client.ClientConfig.escMode().next());
 			com.drew.gba.client.ClientConfig.save();
 			b.setMessage(Component.literal(escLabel()));
-			if (menuOpen) session.setPaused(com.drew.gba.client.ClientConfig.escMode() == com.drew.gba.client.ClientConfig.EscMode.PAUSE);
 		}).bounds(bx, y += BTN_H + BTN_GAP, bw, BTN_H).build();
 		panelWidgets.add(escButton);
-		panelWidgets.add(controls.leave("Leave (Esc Esc)", bx, y += BTN_H + BTN_GAP, bw, BTN_H));
+		panelWidgets.add(controls.leave("Leave (Esc)", bx, y += BTN_H + BTN_GAP, bw, BTN_H));
 		y += BTN_H + 9;
 		switchCx = panelX + PANEL_PAD + 4 + SessionControls.SW_W / 2;
 		switchCy = y + SessionControls.SW_H / 2;
@@ -111,33 +117,13 @@ public final class CrtScreen extends Screen {
 	}
 
 	private static String escLabel() {
-		return "Esc: " + com.drew.gba.client.ClientConfig.escMode().label;
+		return "When leaving: " + com.drew.gba.client.ClientConfig.escMode().label;
 	}
 
 	private void togglePanel() {
 		panelOpen = !panelOpen;
 		applyPanelVisibility();
-		if (!panelOpen && menuOpen) resumeGame(); // closing the menu resumes
 	}
-
-	/** Esc (not linked, menu closed): open the menu. The held keys are released so no input sticks; Pause mode freezes the game. */
-	private void openMenu() {
-		menuOpen = true;
-		session.releaseAll();
-		session.turbo = false;
-		panelOpen = true;
-		applyPanelVisibility();
-		session.setPaused(com.drew.gba.client.ClientConfig.escMode() == com.drew.gba.client.ClientConfig.EscMode.PAUSE);
-	}
-
-	private void resumeGame() {
-		menuOpen = false;
-		session.setPaused(false);
-		session.releaseAll();
-	}
-
-	/** Dev/test: whether the pause menu is open. */
-	public boolean menuOpen() { return menuOpen; }
 
 	private void applyPanelVisibility() {
 		for (AbstractWidget w : panelWidgets) {
@@ -181,12 +167,8 @@ public final class CrtScreen extends Screen {
 
 	@Override
 	public boolean keyPressed(KeyEvent event) {
-		if (event.key() == com.mojang.blaze3d.platform.InputConstants.KEY_ESCAPE && !menuOpen && !session.linkActive()) {
-			openMenu(); // linked: Esc goes straight to the leave confirmation below, the game keeps running for the partner
-			return true;
-		}
 		if (menuKey(event.key())) return true;
-		if (!menuOpen && GbaKeys.press(session, event.key(), controls::requestPowerOff)) return true;
+		if (GbaKeys.press(session, event.key(), controls::requestPowerOff)) return true;
 		if (controls.volumeKey(event.key()) || controls.unlinkKey(event)) return true;
 		return super.keyPressed(event); // Esc closes
 	}
@@ -291,7 +273,7 @@ public final class CrtScreen extends Screen {
 		if (hint) { // two short lines: the full list does not fit a normal window in one
 			String l1 = hintKeys() + "   " + GbaKeys.keyName(com.drew.gba.client.ControlMap.Action.TURBO) + ": fast-forward   "
 				+ GbaKeys.keyName(com.drew.gba.client.ControlMap.Action.SAVE_STATE) + "/" + GbaKeys.keyName(com.drew.gba.client.ControlMap.Action.LOAD_STATE) + ": state";
-			String l2 = "Esc: pause menu (Esc again: leave)   O: options   E: export .sav   I: import .sav   " + GbaKeys.keyName(com.drew.gba.client.ControlMap.Action.POWER) + ": power off";
+			String l2 = "Esc: leave (the TV keeps the picture)   O: options   E: export .sav   I: import .sav   " + GbaKeys.keyName(com.drew.gba.client.ControlMap.Action.POWER) + ": power off";
 			g.text(font, l1, (width - font.width(l1)) / 2, height - 22, 0x99FFFFFF, true);
 			g.text(font, l2, (width - font.width(l2)) / 2, height - 12, 0x99FFFFFF, true);
 			statsY = height - 33;
@@ -344,11 +326,16 @@ public final class CrtScreen extends Screen {
 		if (childOpen) { childOpen = false; return; } // only switching to the import screens
 		if (closed) return;
 		closed = true;
-		session.setPaused(false);
 		controls.flush();
 		controls.endSession(); // Minecraft's volume back to what it was
 		hud.restore(minecraft);
 		if (open == this) open = null;
+		if (!forced && !session.isFinished() && !session.isPoweredOff() && !session.linkActive()) {
+			// 0.5.3: leaving the screen does not stop the game: the TV keeps showing it (paused with a green PAUSED, or running)
+			com.drew.gba.client.crt.CrtDetached.begin(session, crtId);
+			return;
+		}
+		session.setPaused(false);
 		session.requestStop();
 		try {
 			ClientPlayNetworking.send(new Payloads.CrtClose(crtId));

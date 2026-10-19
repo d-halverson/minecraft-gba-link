@@ -360,11 +360,15 @@ too (with the optional resource pack) but only players with the mod can play or 
   | Power off | `P` |
   | Options panel (save/load state, export/import, power switch, volume wheels, Unlink, Leave) | `O` or the **Options** button (top right) |
   | Volume: GBA / Minecraft | `-` `=` / `[` `]` |
-  | Pause menu (opens the Options panel; `Esc` again leaves, `O` resumes; asks first while linked, see *Leaving a link*) | `Esc` |
+  | Leave the screen and walk away (the TV keeps the picture, see below; asks first while linked, see *Leaving a link*) | `Esc` |
 
-  **What `Esc` does** is a setting in the Options panel (button "Esc: Pause" / "Esc: Keep running", remembered): *Pause* freezes the
-  game and shows a green "PAUSED" on the TV (also for spectators); *Keep running* leaves the game, sound and stream running. In both
-  modes no key reaches the game while the menu is open. While linked the game never pauses and `Esc` asks "Leave anyway?" as before.
+  **Leaving the screen** (`Esc`, once, or the Leave button) gives you your player back and the TV does **not** go black. What the TV
+  shows is a setting in the Options panel (button "When leaving: Pause" / "Keep running", remembered): *Pause* (default) freezes the
+  game and shows the last picture with a green "PAUSED" (spectators see it too); *Keep running* keeps the game, the sound (fading
+  with your distance) and the stream going. Walk back and use the TV again to continue where you were. The TV is released (save
+  written, suspend state stored) when you power it off, play another game, disconnect, break the TV, walk more than about 18 blocks
+  away, or leave it paused for 30 minutes / running for 15 minutes. While linked, `Esc` asks "Leave anyway?" and leaving ends the
+  link and the game as before. `O` still opens the Options panel without leaving.
 
   Saves, suspend states and link cables work the same. One player at a time per TV.
 * **Watch.** Modded players within 48 blocks see the live picture on the TV and hear it (low quality, about 8 KB/s).

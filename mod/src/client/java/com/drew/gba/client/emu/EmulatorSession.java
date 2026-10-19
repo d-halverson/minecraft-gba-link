@@ -194,6 +194,19 @@ public final class EmulatorSession implements Runnable {
 		}
 	}
 
+	/** Gain (0..1) applied to this session's own sound; a CRT whose screen the player left fades with the distance to the TV. */
+	private volatile float audioGain = 1f;
+	public void setAudioGain(float g) { audioGain = Math.max(0f, Math.min(1f, g)); }
+
+	/** The samples for this player's own sound line (the spectators' stream always gets the original). */
+	private short[] withGain(short[] pcm, int frames) {
+		float g = audioGain;
+		if (g >= 0.999f) return pcm;
+		short[] out = new short[frames * 2];
+		for (int i = 0; i < frames * 2; i++) out[i] = (short) (pcm[i] * g);
+		return out;
+	}
+
 	public void setPaused(boolean p) { paused = p; if (!p) frames.setPausedOverlay(false); }
 	public boolean isPausedByUser() { return paused; }
 
@@ -509,7 +522,7 @@ public final class EmulatorSession implements Runnable {
 			int got;
 			while ((got = core.readAudio(pcm, 2048)) > 0) {
 				if (!turbo) {
-					audio.write(pcm, got);
+					audio.write(withGain(pcm, got), got);
 					if (st != null) st.offerAudio(pcm, got);
 				}
 				if (got < 2048) break;
@@ -577,7 +590,7 @@ public final class EmulatorSession implements Runnable {
 		if (st != null) st.offerFrame(frames);
 		int got;
 		while ((got = local.readAudio(npPcm, 2048)) > 0) {
-			audio.write(npPcm, got);
+			audio.write(withGain(npPcm, got), got);
 			if (st != null) st.offerAudio(npPcm, got);
 			if (got < 2048) break;
 		}

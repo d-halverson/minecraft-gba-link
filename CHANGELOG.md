@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.3
+
+* **Leaving a CRT keeps the picture on the TV.** 0.5.2 made Esc open a pause menu and leaving still stopped the game, so the TV went
+  black. Now `Esc` (once) or Leave returns your player and the game stays behind the TV: "Pause" mode (default) shows the frozen last
+  picture with the green PAUSED (also in the spectators' stream), "Keep running" keeps emulation, stream and sound (fading with distance)
+  going. Using the TV again re-attaches the screen without restarting. The detached game ends cleanly when the TV is powered off,
+  another game is opened, the player disconnects, the TV is broken, the owner walks about 18 blocks away (server rule) or after
+  30 minutes paused / 15 minutes running. Linked games are unchanged (Esc asks, leaving ends the link). The 0.5.2 pause menu step is gone;
+  `O` still opens the panel. Setting button renamed "When leaving: ...". Server: the player who owns a live TV can re-open it
+  without a restart of the stream.
+
 ## 0.5.2
 
 (0.5.1 was tagged but never published because of a CI test race; everything below ships as 0.5.2.)

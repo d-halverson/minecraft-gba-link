@@ -252,8 +252,13 @@ public final class CrtServer {
 		Live existing = live.get(st.crtId());
 		if (existing != null && !existing.player.equals(p.getUUID())) { GbaServer.hint(p, "Someone is playing"); return; }
 		if (e.distanceToSqr(p) > PLAY_RANGE * PLAY_RANGE) { GbaServer.hint(p, "Too far away"); return; }
-		endForPlayer(p.getUUID());
 		PakData pak = st.pak();
+		if (existing != null) { // 0.5.3: the same player came back to the TV whose screen they had left: the client re-attaches, nothing restarts
+			ServerPlayNetworking.send(p, new Payloads.CrtOpen(existing.crtId, pak.pakId(), pak.sha1(), pak.title(), new byte[0], "",
+				existing.x, existing.y, existing.z, existing.yaw));
+			return;
+		}
+		endForPlayer(p.getUUID());
 		byte[] save = gba.store().read(pak.pakId());
 		gba.openSession(p, pak.pakId(), pak.sha1(), pak.system());
 		Live l = new Live(st.crtId(), p, p.level().dimension(), e.getX(), e.getY(), e.getZ(), st.yaw());

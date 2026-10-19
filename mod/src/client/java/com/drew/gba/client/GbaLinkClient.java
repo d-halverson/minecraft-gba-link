@@ -2,6 +2,7 @@ package com.drew.gba.client;
 
 import com.drew.gba.GbaItems;
 import com.drew.gba.client.crt.CrtClient;
+import com.drew.gba.client.crt.CrtDetached;
 import com.drew.gba.client.crt.CrtStreamer;
 import com.drew.gba.client.emu.EmulatorSession;
 import com.drew.gba.client.emu.GbaNative;
@@ -145,6 +146,7 @@ public class GbaLinkClient implements ClientModInitializer {
 			com.drew.gba.client.ui.SessionControls.restoreMcVolumeNow(); // (the screen's removed() does it too; this is the belt)
 			ClientCable.reset();
 			CrtClient.reset();
+			CrtDetached.endNow(null);
 			EmulatorSession s = current;
 			if (s != null) {
 				s.abort();
@@ -154,6 +156,7 @@ public class GbaLinkClient implements ClientModInitializer {
 		});
 
 		ClientTickEvents.END_CLIENT_TICK.register(client -> {
+			CrtDetached.tick(client);
 			while (unlinkKey.consumeClick()) {
 				if (client.player != null && client.gui.screen() == null) ClientCable.requestUnlink(client);
 			}
@@ -229,12 +232,19 @@ public class GbaLinkClient implements ClientModInitializer {
 	}
 
 	private static void onCrtOpen(Minecraft client, Payloads.CrtOpen p) {
+		EmulatorSession back = CrtDetached.take(p.crtId());
+		if (back != null) { // the player came back to a TV that kept their game: show the screen again, nothing restarts
+			CrtClient.beginOwn(p.crtId(), p.x(), p.y(), p.z(), p.yaw(), back);
+			client.gui.setScreen(new CrtScreen(back, p.crtId()));
+			return;
+		}
 		openGame(client, p.pakId(), p.romSha1(), p.title(), p.save(), p.revision(), p);
 	}
 
 	/** Shared by the GBA item and the CRT TV: prepare the session (resume / save revision guard) and show its screen. */
 	private static void openGame(Minecraft client, UUID pakId, String romSha1, String title, byte[] save, String revision, Payloads.CrtOpen crt) {
 		Path gameDir = FabricLoader.getInstance().getGameDir();
+		CrtDetached.endNow(null); // another game: a CRT left running behind its screen ends here
 		EmulatorSession old = current;
 		if (old != null) {
 			old.stopAndWait(3500);
